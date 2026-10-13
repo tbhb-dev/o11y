@@ -1,8 +1,15 @@
 # Copy to mise.local.toml, fill in, and never commit the copy. The values
-# below are placeholders only; real hostnames, addresses and 1Password
-# references belong in the gitignored mise.local.toml.
+# below are placeholders only; real host names, addresses and paths belong
+# in the gitignored mise.local.toml. tools/check-leaks.sh reads the real
+# values from there and fails a commit or push that carries one.
 [env]
-NAS_SSH_HOST = "nas.example.invalid"
-NAS_SSH_USER = "deploy"
-NAS_DEPLOY_DIR = "/path/to/deploy/dir"
-GRAFANA_ADMIN_PASSWORD_REF = "op://VAULT/ITEM/FIELD"
+O11Y_SSH_HOST = "nas.example.invalid"
+O11Y_REMOTE_DIR = "/srv/o11y"
+O11Y_REMOTE_DOCKER = "/usr/bin/docker"
+O11Y_REMOTE_COMPOSE = "/usr/bin/docker-compose"
+O11Y_REMOTE_TAILSCALE = "/usr/bin/tailscale"
+O11Y_TAILNET_DOMAIN = "example.ts.net"
+O11Y_NODE_ADDR = "192.0.2.10"
+# Comma-separated extra strings to keep out of the repository, such as other
+# host names or a model identifier. May be empty.
+O11Y_PRIVATE_STRINGS = ""

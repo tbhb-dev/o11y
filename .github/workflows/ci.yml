@@ -46,6 +46,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # The leak check's range scan reads every commit of the pull request.
+          fetch-depth: 0
 
       # Installs every tool the mise config pins -- vendir from mise.toml
       # and the rest from the vendored conf.d drop-in -- at the version and
@@ -80,6 +82,13 @@ jobs:
 
       - name: Lint
         run: mise run lint
+
+      # CI holds no private values, so the tree scan inside `lint` checked
+      # only the publishable patterns. This scans the commits the pull
+      # request adds, messages included, with the same patterns.
+      - name: Leak check on the pull request commits
+        if: github.event_name == 'pull_request'
+        run: bash tools/check-leaks.sh --range origin/main..HEAD
 
   test:
     name: test

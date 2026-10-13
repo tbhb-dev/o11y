@@ -16,6 +16,8 @@
     ".rumdl_cache/**/*",
     ".vale/**/*",
     "apm.lock.yaml",
+    // Real private values; the leak check reads this file, nothing else should.
+    "mise.local.toml",
     "mise.lock",
     "tmp/**/*",
     "vendir.lock.yml"

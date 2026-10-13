@@ -5,7 +5,7 @@ tmp/
 apm_modules/
 
 # Secrets and local overrides. mise.local.toml carries internal hostnames,
-# addresses and 1Password references; only mise.local.toml.example is tracked.
+# addresses and paths; only mise.local.toml.example is tracked.
 mise.local.toml
 .env
 .env.*

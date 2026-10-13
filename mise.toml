@@ -74,6 +74,13 @@ esac
 description = "Fail when the vendored payload differs from what vendir.lock.yml pins, without touching the checkout"
 run = "bash tools/check-vendored.sh"
 
+# Arguments pass through to the script: `mise run lint-leaks -- --staged`.
+# With none it scans the working tree.
+[tasks.lint-leaks]
+description = "Fail when a file carries a private value or a private-network pattern"
+usage = 'arg "[args]..."'
+run = "bash tools/check-leaks.sh $usage_args"
+
 # APM merges hook declarations into each harness's settings additively and
 # never reconciles, while `apm audit --ci` replays the same merge from an
 # empty tree and compares. Clearing the keys APM owns first hands the
@@ -130,6 +137,7 @@ run = [
   "bash .claude/skills/pr/scripts/validate-description.sh",
   "vale --output=ai-tells-agent.tmpl PR_AGENTDESC.md",
   "cspell --config .cspell.jsonc --no-summary --no-progress PR_AGENTDESC.md",
+  "bash tools/check-leaks.sh PR_AGENTDESC.md",
 ]
 
 # Both draft tasks are scoped to the one file they receive. The fix-prose
@@ -182,6 +190,7 @@ files=$(git ls-files --cached --others --exclude-standard -- '*.sh' ':!:.claude/
 extends = "devtools:lint"
 run = [
   "mise run check-vendored",
+  "mise run lint-leaks",
   "mise run devtools:check-pins",
   "mise run lint-apm",
   "mise run lint-apm-deploy",
@@ -206,9 +215,13 @@ run = "bats tools/check-vendored.bats"
 description = "Test the devtools pin parser and the prose fixer's failure handling"
 run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
 
+[tasks.test-leaks]
+description = "Test the leak check against throwaway repositories"
+run = "bats tools/check-leaks.bats"
+
 [tasks.test]
 description = "Run every test suite"
-run = ["mise run test-vendored", "mise run test-tools"]
+run = ["mise run test-vendored", "mise run test-tools", "mise run test-leaks"]
 
 [tasks.check]
 description = "Fast quality bar: lint then test"
