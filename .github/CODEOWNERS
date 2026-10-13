@@ -1,0 +1,7 @@
+# Review routing for o11y. GitHub applies the last matching rule.
+
+# Default owner for everything.
+*           @tbhb
+
+# Supply-chain and CI surface.
+/.github/   @tbhb

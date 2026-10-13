@@ -1,0 +1,106 @@
+---
+# Main quality gate. This repo's content is configuration for an
+# observability stack plus the docs and shell scripts around it, so the
+# prose, spelling, Markdown, config, TOML, YAML, workflow, and shell
+# linters are its code gates. Both jobs install the pinned toolchain
+# through mise and run their gates through `mise run`, so the mise config
+# stays the single definition of what each gate runs. The lint job runs the
+# full bar via `mise run lint`, which includes actionlint, after syncing the
+# Vale styles. The test job runs `mise run test`, which checks that the
+# vendored devtools payload still matches what vendir.lock.yml pins.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A lockfile only binds a version it has already seen. Without this, moving
+# a pin in mise.toml and leaving mise.lock alone makes mise fetch the new
+# version, compute a fresh digest, and rewrite the lockfile in place -- so a
+# Renovate PR that touched only the manifest would go green while the
+# committed digests drifted from the pins under review. MISE_LOCKED makes
+# that a hard failure instead.
+env:
+  MISE_LOCKED: "1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    name: lint
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Installs every tool the mise config pins -- vendir from mise.toml
+      # and the rest from the vendored conf.d drop-in -- at the version and
+      # digest recorded in the lockfile beside each config.
+      - name: Set up the toolchain
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.3
+
+      # Resyncs the devtools payload and fails on any difference from the
+      # committed tree, so a vendored file edited in place or a sync nobody
+      # committed is caught before the gates below run against it. The lint
+      # bar runs this too; naming it here makes the failure its own step
+      # rather than the first line of a lint run.
+      - name: Check the vendored payload
+        run: mise run devtools:check-vendored
+
+      # mise installs the vale binary but does not fetch the style packages
+      # .vale.ini declares.
+      - name: Sync Vale styles
+        run: mise run install-tools
+
+      # guard-markdown backs lint-markdown-wrap. The task installs the
+      # version the devtools pin in apm.yml names.
+      - name: Install guard-markdown
+        run: |
+          mise run install-guard-markdown
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Lint
+        run: mise run lint
+
+  test:
+    name: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the toolchain
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.3
+
+      - name: Sync Vale styles
+        run: mise run install-tools
+
+      - name: Test
+        run: mise run test

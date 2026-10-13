@@ -1,6 +1,9 @@
 .DS_Store
 tmp/
 
+# APM dependencies
+apm_modules/
+
 # Secrets and local overrides. mise.local.toml carries internal hostnames,
 # addresses and 1Password references; only mise.local.toml.example is tracked.
 mise.local.toml
@@ -8,9 +11,29 @@ mise.local.toml
 .env.*
 !.env.example
 
+# Agent drafts, authored at the repo root so the Vale and cspell scopes
+# resolve them, linted, consumed, and never committed.
+COMMIT_AGENTMSG
+PR_AGENTDESC.md
+SQUASH_AGENTMSG
+
+# Linter caches
+.rumdl_cache/
+.cspell-cache
+
 # Agent worktrees and local harness settings
 .worktrees/
 .claude/worktrees/
 .claude/settings.local.json
 .codex/worktrees/
 .codex/settings.local.json
+
+# Vale's synced packages. Keep the repo-local style and its vocabulary;
+# each negation needs its parent un-ignored first.
+.vale/*
+!.vale/project/
+!.vale/config/
+.vale/config/*
+!.vale/config/vocabularies/
+.vale/config/vocabularies/*
+!.vale/config/vocabularies/project/

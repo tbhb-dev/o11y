@@ -1,0 +1,20 @@
+* text=auto eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+
+*.lock -diff
+
+# The mise lockfiles hold the toolchain download digests; a version bump's
+# diff is the only place a reviewer sees them change.
+mise.lock diff
+
+# Read by the resolve-rebase-conflicts skill through
+# `git check-attr rebase-resolve`. apm regenerates this lockfile wholesale.
+apm.lock.yaml rebase-resolve=regenerate
+
+# Written by the skill token tooling; re-running it is the answer.
+**/skills/*/tokens.json rebase-resolve=regenerate
+
+# The codex port of resolve-rebase-conflicts shows the conflict marker
+# shape the same way the claude skill does.
+**/skills/codex-resolve-rebase-conflicts/SKILL.md conflict-markers=documented
