@@ -242,7 +242,8 @@ ok "3: all six services are ready, and the four with a healthcheck report health
 # The password reaches curl on stdin, as a real one would have to.
 [[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - "$grafana/api/admin/settings") == 200 ]] ||
   die "4: the admin password from the file does not work"
-[[ $(grafana_status -u admin:admin "$grafana/api/admin/settings") != 200 ]] || die "4: the default admin password works"
+[[ $(printf 'user = "admin:%s"\n' admin | grafana_status -K - "$grafana/api/admin/settings") != 200 ]] ||
+  die "4: the default admin password works"
 [[ $(curl -s -m 15 "$grafana/api/datasources" | jq -c '[.[].uid] | sort') == '["loki","mimir","tempo"]' ]] ||
   die "4: the provisioned datasources are not the expected three"
 [[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
