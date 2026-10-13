@@ -903,3 +903,115 @@ YAML
   # A superuser can read it anyway, which leaves nothing to fail.
   [ "$status" -ne 0 ] || [ -r zebra-host-01.txt ]
 }
+
+# --- diffs git suppresses ------------------------------------------------
+
+@test "a text blob that replaces a binary one is scanned though git hides the diff" {
+  printf 'clean\000binary' >f.dat
+  git add f.dat
+  git commit -q -m "chore: binary"
+  before=$(git rev-parse HEAD)
+  printf 'zebra-host-01\n' >f.dat
+  git commit -q -am "chore: now text"
+  run_check --range "$before..HEAD"
+  [ "$status" -eq 1 ]
+  [[ $output == *"f.dat:1: private literal O11Y_SSH_HOST"* ]]
+  git remote add second "$work/second.git"
+  PRE_COMMIT_REMOTE_NAME=second PRE_COMMIT_TO_REF=HEAD run_check --pre-push </dev/null
+  [ "$status" -eq 1 ]
+}
+
+@test "a file marked -diff in .gitattributes is scanned whole" {
+  echo '*.dat -diff' >.gitattributes
+  echo "zebra-host-01" >leak.dat
+  git add .gitattributes leak.dat
+  git commit -q -m "chore: hidden diff"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.dat:1: private literal O11Y_SSH_HOST"* ]]
+}
+
+@test "a merge result whose diff git hides is scanned whole" {
+  echo '*.dat -diff' >.gitattributes
+  echo one >m.dat
+  git add .gitattributes m.dat
+  git commit -q -m "chore: base dat"
+  start=$(git rev-parse HEAD)
+  git switch -q -c side
+  printf 'one\nside\n' >m.dat
+  git commit -q -am "chore: side"
+  git switch -q main
+  printf 'top\none\n' >m.dat
+  git commit -q -am "chore: top"
+  git merge -q --no-commit --no-ff side || true
+  printf 'top\none\nside\nzebra-host-01\n' >m.dat
+  git add m.dat
+  git commit -q -m "chore: merge"
+  run_check --range "$start..HEAD"
+  [ "$status" -eq 1 ]
+  [[ $output == *"m.dat:4: private literal O11Y_SSH_HOST"* ]]
+}
+
+# --- the destination ----------------------------------------------------
+
+@test "the real pre-push hook doesn't trust tracking refs when pushes go to another URL" {
+  hook_fixture
+  # The leak sits in a commit that origin's fetch side is said to have.
+  git switch -q -c child leaky-branch
+  echo "fine" >child.md
+  git add child.md
+  git commit -q -m "chore: clean child"
+  git update-ref refs/remotes/origin/leaky-branch leaky-branch
+  git switch -q main
+  git branch -q -D leaky-branch clean-branch
+  git init -q --bare "$work/other.git"
+  git remote set-url --push origin "$work/other.git"
+  run git push origin child
+  [ "$status" -ne 0 ]
+  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
+  no_secrets
+  [ -z "$(git ls-remote "$work/other.git" refs/heads/child)" ]
+  # With one URL for both directions the tracking refs do describe the remote.
+  git remote set-url --push origin "$work/origin.git"
+  run git push origin child
+  [ "$status" -eq 0 ]
+}
+
+@test "--pre-push given a push URL that differs from the remote's scans in full" {
+  push_fixture
+  git update-ref refs/remotes/origin/main "$tip"
+  pushes origin "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 0 ]
+  printf '%s\n' "refs/heads/f $tip refs/heads/f $zero" >"$BATS_TEST_TMPDIR/tuples"
+  run bash "$checker" --pre-push origin "$work/elsewhere.git" <"$BATS_TEST_TMPDIR/tuples"
+  [ "$status" -eq 1 ]
+}
+
+# --- sanitizing and the entry point ----------------------------------------
+
+@test "a path in an exempt tree is still replaced by an opaque identifier" {
+  mkdir -p .devtools
+  echo "zebra-host-01" >.devtools/10.1.2.3.txt
+  git add .devtools
+  run_check --staged
+  [ "$status" -eq 1 ]
+  [[ $output =~ path#[0-9a-f]{8}:1:\ private\ literal\ O11Y_SSH_HOST ]]
+  [[ $output != *".txt"* ]]
+}
+
+@test "the mise task keeps argument boundaries" {
+  command -v mise >/dev/null
+  local line
+  line=$(awk '/^\[tasks.lint-leaks\]/ { f = 1 } f && /^run = / { print; exit }' "$repo_root/mise.toml")
+  [[ $line == 'run = "bash tools/check-leaks.sh"' ]]
+  printf '[tasks.lint-leaks]\nrun = "bash %s"\n' "$checker" >mise.toml
+  mise trust -q "$work/mise.toml"
+  echo "fine" >"a file with spaces.md"
+  run mise run lint-leaks -- "a file with spaces.md"
+  [ "$status" -eq 0 ]
+  echo "zebra-host-01" >"leak with spaces.md"
+  run mise run lint-leaks -- "leak with spaces.md"
+  [ "$status" -eq 1 ]
+  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
+  no_secrets
+}

@@ -48,7 +48,7 @@
 # URL-encoded, base64-encoded or otherwise transformed is not found; a
 # value split across lines is not found; a literal under four characters is
 # skipped; and an entry of O11Y_PRIVATE_STRINGS cannot contain a comma.
-# cspell:ignore getline tolower RSTART RLENGTH ACMRT quotepath gitlinks sprintf objecttype objectname
+# cspell:ignore numstat getline tolower RSTART RLENGTH ACMRT quotepath gitlinks sprintf objecttype objectname
 set -euo pipefail
 export LC_ALL=C
 
@@ -213,7 +213,8 @@ scan() {
     # Name a location: as given, unless the name itself matches a rule.
     function locate(full,    n) {
       quiet = 1; hits = 0
-      check(tolower("/" full), (full ~ exempt))
+      # Exemptions silence findings, never the sanitizing of a location.
+      check(tolower("/" full), 0)
       quiet = 0
       return hits ? opaque(full) : full
     }
@@ -301,8 +302,7 @@ emit_tree() {
 
 # emit_raw FILE MODE: the paths of a `diff --raw -z -M` listing, with both
 # sides of a rename or copy. With MODE content it also emits each new blob
-# whole; with MODE binary only the new blobs that hold a NUL, because the
-# patch hides a binary file's content.
+# whole; with any other MODE, only the paths.
 emit_raw() {
   local meta st p1 p2 p
   local -a m
@@ -324,11 +324,6 @@ emit_raw() {
       emit_blob "$p" "${m[3]}"
     else
       emit_path "$p"
-      git cat-file blob "${m[3]}" >"$tmp/blob"
-      if has_nul "$tmp/blob"; then
-        printf '\001%s\n' "$(esc "$p")"
-        emit_body "$tmp/blob"
-      fi
     fi
   done <"$1"
 }
@@ -364,36 +359,60 @@ emit_added() {
   '
 }
 
+# emit_suppressed COMMIT FILE: whole new blobs for the files whose text
+# git won't diff. A binary file, a file marked -diff in .gitattributes, or
+# one whose old version was binary all show as "-" in numstat, and the
+# patch then holds no lines to scan. A blob with a NUL that git still
+# diffs as text gets the same treatment.
+emit_suppressed() {
+  local t rest p
+  while IFS= read -r -d '' t; do
+    rest=${t#*$'\t'}
+    p=${rest#*$'\t'}
+    if [[ -z $p ]]; then
+      # A rename lists its old and new names as separate fields.
+      IFS= read -r -d '' _
+      IFS= read -r -d '' p
+    fi
+    if git cat-file -e "$1:$p"; then
+      git cat-file blob "$1:$p" >"$tmp/blob"
+      if [[ ${t%%$'\t'*} == - ]] || has_nul "$tmp/blob"; then
+        printf '\001%s\n' "$(esc "$p")"
+        emit_body "$tmp/blob"
+      fi
+    fi
+  done <"$2"
+}
+
 # emit_commits: the commits named on stdin, in the order given. Each
-# contributes its message, its paths, and its added lines. The patch hides
-# a binary file, so a changed binary blob is scanned whole.
+# contributes its message, its paths, and its added lines, plus the whole
+# new blob of any file whose diff git suppresses.
 emit_commits() {
   local c parents p
   while IFS= read -r c; do
     git log -1 --format=%B "$c" | emit_text "commit ${c:0:7} message"
     parents=$(git rev-list --parents -n 1 "$c")
     if [[ $parents == *" "*" "* ]]; then
-      # A merge: the files it changed against every parent, then what is
-      # new in them. A binary result is read from the merge commit itself.
+      # A merge: scan the whole result of every file it changed against
+      # all parents. That is more than the lines it adds, but it also covers
+      # a file whose textual diff git suppresses.
       git diff-tree --cc -r --name-only -z --no-commit-id "$c" >"$tmp/names"
       while IFS= read -r -d '' p; do
         emit_path "$p"
         # A path the merge deleted has no blob; one that exists must read.
         if git cat-file -e "$c:$p"; then
           git cat-file blob "$c:$p" >"$tmp/blob"
-          if has_nul "$tmp/blob"; then
-            printf '\001%s\n' "$(esc "$p")"
-            emit_body "$tmp/blob"
-          fi
+          printf '\001%s\n' "$(esc "$p")"
+          emit_body "$tmp/blob"
         fi
       done <"$tmp/names"
-      git -c core.quotepath=off diff-tree --cc -p -U0 --no-color --no-ext-diff \
-        --no-commit-id "$c" | emit_added
     else
       git diff-tree --root -r -M --raw -z --no-commit-id --diff-filter=ACMRT "$c" >"$tmp/raw"
-      emit_raw "$tmp/raw" binary
+      emit_raw "$tmp/raw" paths
       git -c core.quotepath=off diff-tree --root -r -M -p -U0 --no-color --no-ext-diff \
         --diff-filter=ACMRT --no-commit-id "$c" | emit_added
+      git diff-tree --root -r -M --numstat -z --no-commit-id --diff-filter=ACMRT "$c" >"$tmp/stat"
+      emit_suppressed "$c" "$tmp/stat"
     fi
   done
 }
@@ -438,7 +457,7 @@ emit_tag() {
 # to be there and everything reachable is scanned. An upstream or
 # origin/main never stands in for it.
 emit_pre_push() {
-  local remote=${1:-${PRE_COMMIT_REMOTE_NAME-}} url=${PRE_COMMIT_REMOTE_URL-}
+  local remote=${1:-${PRE_COMMIT_REMOTE_NAME-}} url=${2:-${PRE_COMMIT_REMOTE_URL-}}
   local name='' manual='' r local_sha remote_sha u
   local -a args
   : >"$tmp/tuples"
@@ -457,6 +476,15 @@ emit_pre_push() {
         break
       fi
     done <"$tmp/remotes"
+  fi
+  # A remote's tracking refs describe what it fetches from. If pushes go
+  # elsewhere, or the hook was given another URL, they say nothing about
+  # the destination, so assume it has nothing.
+  if [[ -n $name ]]; then
+    if [[ $(git remote get-url "$name") != "$(git remote get-url --push "$name")" ]] ||
+      [[ -n $url && $url != "$(git remote get-url --push "$name")" ]]; then
+      name=
+    fi
   fi
   : >"$tmp/tags"
   : >"$tmp/starts"
@@ -495,6 +523,7 @@ emit_pre_push() {
 mode=tree
 range=
 remote=
+push_url=
 files=()
 while (($#)); do
   case $1 in
@@ -510,6 +539,10 @@ while (($#)); do
     if (($# > 1)) && [[ $2 != -* ]]; then
       remote=$2
       shift
+      if (($# > 1)) && [[ $2 != -* ]]; then
+        push_url=$2
+        shift
+      fi
     fi
     ;;
   -*) die "unknown option" ;;
@@ -529,7 +562,7 @@ case $mode in
 tree) emit_tree >"$tmp/stream" ;;
 staged) emit_staged >"$tmp/stream" ;;
 range) emit_range "$range" >"$tmp/stream" ;;
-pre-push) emit_pre_push "$remote" >"$tmp/stream" ;;
+pre-push) emit_pre_push "$remote" "$push_url" >"$tmp/stream" ;;
 files)
   for f in "${files[@]}"; do
     [[ -f $f ]] || die "an argument is not a readable file"

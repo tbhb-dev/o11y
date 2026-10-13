@@ -78,8 +78,7 @@ run = "bash tools/check-vendored.sh"
 # With none it scans the working tree.
 [tasks.lint-leaks]
 description = "Fail when a file carries a private value or a private-network pattern"
-usage = 'arg "[args]..."'
-run = "bash tools/check-leaks.sh $usage_args"
+run = "bash tools/check-leaks.sh"
 
 # APM merges hook declarations into each harness's settings additively and
 # never reconciles, while `apm audit --ci` replays the same merge from an
