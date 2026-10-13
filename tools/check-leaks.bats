@@ -2,7 +2,7 @@
 # The leak check against throwaway repositories. Every sample is built at
 # run time from made-up values, so no real private value appears in this
 # file, and the real O11Y_* environment is cleared before each case.
-# cspell:ignore compgen gpgsign btrfs servicesx
+# cspell:ignore compgen gpgsign btrfs servicesx nothex repointed
 
 setup() {
   checker="$BATS_TEST_DIRNAME/check-leaks.sh"
@@ -11,7 +11,7 @@ setup() {
   repo_root=$(git -C "$BATS_TEST_DIRNAME" rev-parse --show-toplevel)
 
   unset GIT_DIR GIT_COMMON_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
-  unset PRE_COMMIT_FROM_REF PRE_COMMIT_TO_REF GITHUB_ACTIONS
+  unset PRE_COMMIT_FROM_REF PRE_COMMIT_TO_REF GITHUB_ACTIONS CI
   for name in $(compgen -v O11Y_); do unset "$name"; done
 
   export O11Y_SSH_HOST=zebra-host-01
@@ -282,7 +282,7 @@ run_check() {
   git commit -q -m "chore: add binaries"
   run_check --range "$base..HEAD"
   [ "$status" -eq 1 ]
-  [[ $output == *"blob.bin:binary: private literal O11Y_SSH_HOST"* ]]
+  [[ $output == *"blob.bin:2: private literal O11Y_SSH_HOST"* ]]
   run_check
   [ "$status" -eq 1 ]
   [[ $output == *"blob.bin:binary: private literal O11Y_SSH_HOST"* ]]
@@ -313,7 +313,7 @@ run_check() {
   git commit -q -m "chore: add a" -m "the box is zebra-host-01 on the tailnet"
   run_check --range "$base..HEAD"
   [ "$status" -eq 1 ]
-  [[ $output == *"message:3: private literal O11Y_SSH_HOST"* ]]
+  [[ $output =~ commit\ [0-9a-f]{7}:[0-9]+:\ private\ literal\ O11Y_SSH_HOST ]]
   no_value "zebra-host-01"
 }
 
@@ -323,7 +323,7 @@ run_check() {
   git commit -q -m "chore: reach foo.ts.net"
   run_check --range "$base..HEAD"
   [ "$status" -eq 1 ]
-  [[ $output == *"message:1: pattern: tailnet host name"* ]]
+  [[ $output =~ commit\ [0-9a-f]{7}:[0-9]+:\ pattern:\ tailnet\ host\ name ]]
 }
 
 @test "--range ignores removed lines and lines outside the range" {
@@ -340,108 +340,6 @@ run_check() {
 @test "--range reports a bad range as misuse" {
   run_check --range missing..HEAD
   [ "$status" -eq 2 ]
-}
-
-# A repository with a leaking commit on top of the base, and remotes to push
-# it to: origin already has the base, second has nothing.
-push_fixture() {
-  git remote add origin "$work/origin.git"
-  git remote add second "$work/second.git"
-  git update-ref refs/remotes/origin/main "$base"
-  echo "clean" >a.md
-  git add a.md
-  git commit -q -m "chore: clean"
-  clean=$(git rev-parse HEAD)
-  echo "line zebra-host-01" >b.md
-  git add b.md
-  git commit -q -m "chore: leaky"
-  tip=$(git rev-parse HEAD)
-  zero=0000000000000000000000000000000000000000
-}
-
-# pushes REMOTE LINE...: feed ref-update lines to --pre-push as git does.
-pushes() {
-  local remote=$1
-  shift
-  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/tuples"
-  run bash "$checker" --pre-push "$remote" <"$BATS_TEST_TMPDIR/tuples"
-  no_secrets
-}
-
-@test "--pre-push scans a new branch from what the remote has" {
-  push_fixture
-  pushes origin "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
-  no_value "zebra-host-01"
-}
-
-@test "--pre-push skips commits the destination already has" {
-  push_fixture
-  git update-ref refs/remotes/origin/f "$tip"
-  pushes origin "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 0 ]
-}
-
-@test "--pre-push scans in full a branch published to a remote other than the tracking one" {
-  push_fixture
-  git update-ref refs/remotes/origin/f "$tip"
-  pushes second "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
-}
-
-@test "--pre-push maps a push to a remote's URL back to that remote" {
-  push_fixture
-  git update-ref refs/remotes/origin/f "$tip"
-  pushes "$work/origin.git" "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 0 ]
-  pushes "$work/second.git" "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-}
-
-@test "--pre-push scans only what an existing remote branch lacks" {
-  push_fixture
-  pushes origin "refs/heads/f $tip refs/heads/f $tip"
-  [ "$status" -eq 0 ]
-  pushes origin "refs/heads/f $tip refs/heads/f $clean"
-  [ "$status" -eq 1 ]
-  pushes origin "refs/heads/f $clean refs/heads/f $base"
-  [ "$status" -eq 0 ]
-}
-
-@test "--pre-push treats a remote sha it doesn't have as unknown, not as a reason to skip" {
-  push_fixture
-  pushes second "refs/heads/f $tip refs/heads/f 1234567890123456789012345678901234567890"
-  [ "$status" -eq 1 ]
-}
-
-@test "--pre-push scans every ref in one push and ignores a deletion" {
-  push_fixture
-  pushes second "(delete) $zero refs/heads/gone 1234567890123456789012345678901234567890"
-  [ "$status" -eq 0 ]
-  pushes second "(delete) $zero refs/heads/gone 1234567890123456789012345678901234567890" \
-    "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-}
-
-@test "--pre-push falls back to the variables prek sets" {
-  push_fixture
-  PRE_COMMIT_REMOTE_NAME=second PRE_COMMIT_TO_REF=$tip run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
-  # The remote's own refs decide what it has, not the from-ref prek reports.
-  git update-ref refs/remotes/second/main "$tip"
-  PRE_COMMIT_REMOTE_NAME=second PRE_COMMIT_TO_REF=$tip run_check --pre-push </dev/null
-  [ "$status" -eq 0 ]
-}
-
-@test "--pre-push by hand scans what no remote has" {
-  push_fixture
-  run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
-  git update-ref refs/remotes/origin/main "$tip"
-  run_check --pre-push </dev/null
-  [ "$status" -eq 0 ]
 }
 
 @test "a private string in a tracked file name is a finding" {
@@ -485,8 +383,7 @@ pushes() {
   git commit -q -m "chore: rename"
   run_check --range "$before..HEAD"
   [ "$status" -eq 1 ]
-  [[ $output =~ path#[0-9a-f]{8}:path:\ private\ literal\ O11Y_SSH_HOST ]]
-  no_value "zebra-host-01"
+  [[ $output =~ tree\ [0-9a-f]{7}:[0-9]+:\ private\ literal\ O11Y_SSH_HOST ]]
 }
 
 @test "a mode change or an empty file in a range still shows its path" {
@@ -582,157 +479,6 @@ pushes() {
   run_check
   [ "$status" -eq 0 ]
   [[ $output == *"mise.local.toml exists here but its values are not in the environment"* ]]
-}
-
-# --- the hook as git and prek run it ---------------------------------------
-
-# hook_fixture: a repository with a bare origin, and the repository's real
-# pre-push hook entry installed through prek.
-hook_fixture() {
-  command -v prek >/dev/null
-  local entry
-  entry=$(awk '/id: leaks-outgoing/ { f = 1 } f && /entry:/ { sub(/.*entry: /, ""); print; exit }' \
-    "$repo_root/.pre-commit-config.yaml")
-  [[ $entry == "mise run lint-leaks -- --pre-push" ]]
-  entry="bash $checker --pre-push"
-  git init -q --bare "$work/origin.git"
-  git remote add origin "$work/origin.git"
-  cat >.pre-commit-config.yaml <<YAML
----
-repos:
-  - repo: local
-    hooks:
-      - id: leaks-outgoing
-        name: leak check (outgoing commits)
-        entry: $entry
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
-YAML
-  git add .pre-commit-config.yaml
-  git commit -q -m "chore: hook"
-  git push -q origin main 2>/dev/null
-  git config --unset core.hooksPath
-  prek install -t pre-push >/dev/null 2>&1
-  git branch clean-branch
-  git switch -q clean-branch
-  echo "fine" >c.md
-  git add c.md
-  git commit -q -m "chore: clean"
-  git switch -q -c leaky-branch main
-  echo "host zebra-host-01" >l.md
-  git add l.md
-  git commit -q -m "chore: leaky"
-}
-
-@test "the real pre-push hook rejects a push of two refs when only one leaks, in either order" {
-  hook_fixture
-  run git push origin clean-branch leaky-branch
-  [ "$status" -ne 0 ]
-  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
-  no_secrets
-  run git push origin leaky-branch clean-branch
-  [ "$status" -ne 0 ]
-  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
-  [ -z "$(git ls-remote origin refs/heads/clean-branch refs/heads/leaky-branch)" ]
-}
-
-@test "the real pre-push hook lets a clean push through once nothing local leaks" {
-  hook_fixture
-  git branch -q -D leaky-branch 2>/dev/null || { git switch -q clean-branch && git branch -q -D leaky-branch; }
-  run git push origin clean-branch
-  [ "$status" -eq 0 ]
-  [ -n "$(git ls-remote origin refs/heads/clean-branch)" ]
-}
-
-@test "the real pre-push hook blocks a push of a clean branch while another local branch leaks" {
-  hook_fixture
-  run git push origin clean-branch
-  [ "$status" -ne 0 ]
-  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
-}
-
-@test "the real pre-push hook scans an annotated tag sent with new commits" {
-  hook_fixture
-  git switch -q main
-  git branch -q -D leaky-branch
-  git tag -a -m "release for zebra-host-01" v1 main
-  run git push origin clean-branch v1
-  [ "$status" -ne 0 ]
-  [[ $output == *"tag "*"private literal O11Y_SSH_HOST"* ]]
-  no_secrets
-  [ -z "$(git ls-remote origin refs/tags/v1)" ]
-}
-
-# prek skips the pre-push stage when a push brings no new commits, so a push
-# of only a tag on a commit the remote already has never reaches the check.
-# AGENTS.md lists this as a limit; this test keeps it from going unnoticed.
-@test "known limit: prek doesn't run the pre-push stage for a tag-only push" {
-  hook_fixture
-  git switch -q main
-  git tag -a -m "release for zebra-host-01" v1 main
-  run git push origin v1
-  [ "$status" -eq 0 ]
-}
-
-# --- destinations -----------------------------------------------------------
-
-@test "a new branch sent to a remote that lacks the commit is scanned though origin has it" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  pushes second "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
-}
-
-@test "--pre-push takes the destination from the prek variables when no argument is given" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  PRE_COMMIT_REMOTE_NAME=second PRE_COMMIT_TO_REF=$tip run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
-  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
-  PRE_COMMIT_REMOTE_NAME=origin PRE_COMMIT_TO_REF=$tip run_check --pre-push </dev/null
-  [ "$status" -eq 0 ]
-}
-
-@test "a destination that matches no configured remote is assumed to have nothing" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  pushes "$work/unknown.git" "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 1 ]
-}
-
-@test "a local sha git can't read fails the check instead of passing it" {
-  push_fixture
-  pushes second "refs/heads/f 1234567890123456789012345678901234567890 refs/heads/f $zero"
-  [ "$status" -eq 2 ]
-  [[ $output == *"incomplete"* ]]
-}
-
-# --- tags ---------------------------------------------------------------
-
-@test "--pre-push scans an annotated tag's message and its target" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  git tag -a -m "tag for zebra-host-01" t1 "$clean"
-  tag_sha=$(git rev-parse t1)
-  pushes origin "refs/tags/t1 $tag_sha refs/tags/t1 $zero"
-  [ "$status" -eq 1 ]
-  [[ $output == *"tag "*"private literal O11Y_SSH_HOST"* ]]
-  PRE_COMMIT_REMOTE_NAME=origin run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
-  [[ $output == *"tag "*"private literal O11Y_SSH_HOST"* ]]
-}
-
-@test "--pre-push scans a tag that points at a blob" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  blob=$(echo "inside zebra-host-01" | git hash-object -w --stdin)
-  git tag -a -m "clean message" tb "$blob"
-  PRE_COMMIT_REMOTE_NAME=origin run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
-  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
 }
 
 # --- merges and type changes -------------------------------------------
@@ -916,9 +662,6 @@ YAML
   run_check --range "$before..HEAD"
   [ "$status" -eq 1 ]
   [[ $output == *"f.dat:1: private literal O11Y_SSH_HOST"* ]]
-  git remote add second "$work/second.git"
-  PRE_COMMIT_REMOTE_NAME=second PRE_COMMIT_TO_REF=HEAD run_check --pre-push </dev/null
-  [ "$status" -eq 1 ]
 }
 
 @test "a file marked -diff in .gitattributes is scanned whole" {
@@ -952,41 +695,6 @@ YAML
   [[ $output == *"m.dat:4: private literal O11Y_SSH_HOST"* ]]
 }
 
-# --- the destination ----------------------------------------------------
-
-@test "the real pre-push hook doesn't trust tracking refs when pushes go to another URL" {
-  hook_fixture
-  # The leak sits in a commit that origin's fetch side is said to have.
-  git switch -q -c child leaky-branch
-  echo "fine" >child.md
-  git add child.md
-  git commit -q -m "chore: clean child"
-  git update-ref refs/remotes/origin/leaky-branch leaky-branch
-  git switch -q main
-  git branch -q -D leaky-branch clean-branch
-  git init -q --bare "$work/other.git"
-  git remote set-url --push origin "$work/other.git"
-  run git push origin child
-  [ "$status" -ne 0 ]
-  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
-  no_secrets
-  [ -z "$(git ls-remote "$work/other.git" refs/heads/child)" ]
-  # With one URL for both directions the tracking refs do describe the remote.
-  git remote set-url --push origin "$work/origin.git"
-  run git push origin child
-  [ "$status" -eq 0 ]
-}
-
-@test "--pre-push given a push URL that differs from the remote's scans in full" {
-  push_fixture
-  git update-ref refs/remotes/origin/main "$tip"
-  pushes origin "refs/heads/f $tip refs/heads/f $zero"
-  [ "$status" -eq 0 ]
-  printf '%s\n' "refs/heads/f $tip refs/heads/f $zero" >"$BATS_TEST_TMPDIR/tuples"
-  run bash "$checker" --pre-push origin "$work/elsewhere.git" <"$BATS_TEST_TMPDIR/tuples"
-  [ "$status" -eq 1 ]
-}
-
 # --- sanitizing and the entry point ----------------------------------------
 
 @test "a path in an exempt tree is still replaced by an opaque identifier" {
@@ -1014,4 +722,435 @@ YAML
   [ "$status" -eq 1 ]
   [[ $output == *"private literal O11Y_SSH_HOST"* ]]
   no_secrets
+}
+
+# --- the ref lines ------------------------------------------------------------
+
+zero=0000000000000000000000000000000000000000
+
+# lines LINE...: feed ref-update lines to --pre-push on stdin, as git does.
+lines() {
+  # A destination that already has the starting commit, unless a case names
+  # another one in $dest.
+  if [[ ! -d $work/origin.git ]]; then
+    git init -q --bare "$work/origin.git"
+    git push -q "$work/origin.git" "$base:refs/heads/main"
+  fi
+  printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/lines"
+  run bash "$checker" --pre-push origin "${dest:-$work/origin.git}" <"$BATS_TEST_TMPDIR/lines"
+  no_secrets
+}
+
+leaky_history() {
+  echo "clean" >a.md
+  git add a.md
+  git commit -q -m "chore: clean"
+  clean=$(git rev-parse HEAD)
+  echo "host zebra-host-01" >b.md
+  git add b.md
+  git commit -q -m "chore: leaky"
+  tip=$(git rev-parse HEAD)
+}
+
+@test "--pre-push scans what the line's remote oid doesn't reach" {
+  leaky_history
+  lines "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 1 ]
+  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
+  lines "refs/heads/f $tip refs/heads/f $tip"
+  [ "$status" -eq 0 ]
+  lines "refs/heads/f $tip refs/heads/f $clean"
+  [ "$status" -eq 1 ]
+  lines "refs/heads/f $clean refs/heads/f $base"
+  [ "$status" -eq 0 ]
+}
+
+@test "--pre-push excludes nothing for a remote oid that isn't here" {
+  leaky_history
+  lines "refs/heads/f $tip refs/heads/f 1234567890123456789012345678901234567890"
+  [ "$status" -eq 1 ]
+}
+
+@test "--pre-push ignores remote-tracking refs and the environment" {
+  leaky_history
+  git update-ref refs/remotes/origin/main "$tip"
+  PRE_COMMIT_REMOTE_NAME=origin PRE_COMMIT_TO_REF=$tip lines "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 1 ]
+}
+
+@test "--pre-push scans every line and skips a deletion's objects" {
+  leaky_history
+  lines "(delete) $zero refs/heads/gone 1234567890123456789012345678901234567890"
+  [ "$status" -eq 0 ]
+  lines "refs/heads/ok $clean refs/heads/ok $base" "refs/heads/f $tip refs/heads/f $clean"
+  [ "$status" -eq 1 ]
+}
+
+@test "--pre-push rejects a malformed line" {
+  leaky_history
+  lines "nonsense"
+  [ "$status" -eq 2 ]
+  lines "refs/heads/f nothex refs/heads/f $zero"
+  [ "$status" -eq 2 ]
+  lines "refs/heads/f $tip refs/heads/f $zero extra"
+  [ "$status" -eq 2 ]
+}
+
+@test "--pre-push asks the destination what it has when a ref is new" {
+  # The destination already holds a leaking commit; a clean branch off it passes.
+  echo "host zebra-host-01" >old.md
+  git add old.md
+  git commit -q -m "chore: old leak"
+  old=$(git rev-parse HEAD)
+  git init -q --bare "$work/origin.git"
+  git push -q "$work/origin.git" "$old:refs/heads/main"
+  echo ok >new.md
+  git add new.md
+  git commit -q -m "chore: clean"
+  tip=$(git rev-parse HEAD)
+  lines "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 0 ]
+  echo "another host zebra-host-01" >new2.md
+  git add new2.md
+  git commit -q -m "chore: new leak"
+  lines "refs/heads/f $(git rev-parse HEAD) refs/heads/f $zero"
+  [ "$status" -eq 1 ]
+  [[ $output == *"new2.md:1: private literal O11Y_SSH_HOST"* ]]
+}
+
+@test "--pre-push scans everything for an empty destination, whatever the tracking refs say" {
+  leaky_history
+  git update-ref refs/remotes/origin/main "$tip"
+  git init -q --bare "$work/empty.git"
+  dest="$work/empty.git" lines "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 1 ]
+  [[ $output == *"b.md:1: private literal O11Y_SSH_HOST"* ]]
+}
+
+@test "--pre-push fails when the destination can't be asked" {
+  leaky_history
+  dest="$work/nowhere.git" lines "refs/heads/f $tip refs/heads/f $zero"
+  [ "$status" -eq 2 ]
+  [[ $output == *"incomplete"* ]]
+}
+
+@test "--pre-push without a URL excludes nothing for a new ref" {
+  leaky_history
+  printf '%s\n' "refs/heads/f $tip refs/heads/f $zero" >"$BATS_TEST_TMPDIR/lines"
+  run_check --pre-push origin <"$BATS_TEST_TMPDIR/lines"
+  [ "$status" -eq 1 ]
+}
+
+@test "--pre-push scans ref names" {
+  echo ok >a.md
+  git add a.md
+  git commit -q -m "chore: ok"
+  lines "refs/heads/zebra-host-01-fix $(git rev-parse HEAD) refs/heads/zebra-host-01-fix $zero"
+  [ "$status" -eq 1 ]
+  [[ $output =~ path#[0-9a-f]{8}:path:\ private\ literal\ O11Y_SSH_HOST ]]
+}
+
+@test "--pre-push with no lines scans everything reachable from HEAD" {
+  leaky_history
+  run_check --pre-push </dev/null
+  [ "$status" -eq 1 ]
+}
+
+@test "--pre-push and --range refuse a shallow repository" {
+  leaky_history
+  git clone -q --depth 1 "file://$work" "$BATS_TEST_TMPDIR/shallow"
+  cd "$BATS_TEST_TMPDIR/shallow"
+  run_check --pre-push </dev/null
+  [ "$status" -eq 2 ]
+  run_check --range HEAD
+  [ "$status" -eq 2 ]
+}
+
+@test "a missing object fails the scan" {
+  echo "unique content for a loose blob" >c.md
+  git add c.md
+  git commit -q -m "chore: c"
+  oid=$(git rev-parse HEAD:c.md)
+  rm "$(git rev-parse --git-path "objects/${oid:0:2}/${oid:2}")"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 2 ]
+  [[ $output == *"incomplete"* ]]
+}
+
+@test "an annotated tag, nested or not, is scanned with its target" {
+  echo ok >a.md
+  git add a.md
+  git commit -q -m "chore: ok"
+  git tag -a -m "outer zebra-host-01" t1
+  git tag -a -m "nested" t2 t1 2>/dev/null
+  lines "refs/tags/t2 $(git rev-parse t2) refs/tags/t2 $zero"
+  [ "$status" -eq 1 ]
+  [[ $output == *"tag "*"private literal O11Y_SSH_HOST"* ]]
+}
+
+# --- the installed hook, with real pushes --------------------------------------
+
+# hook_repo: this repository's hook wrapper installed in front of prek's, with
+# bare repositories to push to.
+hook_repo() {
+  command -v prek >/dev/null
+  command -v mise >/dev/null
+  mkdir -p tools
+  cp "$checker" tools/check-leaks.sh
+  cp "$BATS_TEST_DIRNAME/install-pre-push.sh" tools/install-pre-push.sh
+  # The real task definition, so the hook runs the entry the repository ships.
+  awk '/^\[tasks.lint-leaks\]/ { f = 1 } f && /^$/ { exit } f { print }' "$repo_root/mise.toml" >mise.toml
+  [[ -s mise.toml ]]
+  mise trust -q "$work/mise.toml"
+  cat >.pre-commit-config.yaml <<YAML
+---
+repos:
+  - repo: local
+    hooks:
+      - id: saw
+        name: saw
+        entry: touch $BATS_TEST_TMPDIR/prek-ran
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
+YAML
+  git add -A
+  git commit -q -m "chore: hook"
+  git init -q --bare "$work/A.git"
+  git init -q --bare "$work/B.git"
+  git remote add origin "$work/A.git"
+  git push -q origin main
+  git config --unset core.hooksPath
+  prek install -t pre-push >/dev/null 2>&1
+  bash tools/install-pre-push.sh >/dev/null
+  rm -f "$BATS_TEST_TMPDIR/prek-ran"
+}
+
+push_ok() {
+  run git push "$@"
+  no_secrets
+  [ "$status" -eq 0 ]
+}
+
+push_blocked() {
+  run git push "$@"
+  [ "$status" -ne 0 ]
+  # Only the check's own lines are ours; git prints ref names itself.
+  ! grep -E 'check-leaks|private literal|pattern:' <<<"$output" | grep -qF -e zebra-host-01 -e kestrel99
+}
+
+@test "a clean push passes through the wrapper to prek's hook" {
+  hook_repo
+  git switch -q -c clean
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: clean"
+  push_ok origin clean
+  [ -f "$BATS_TEST_TMPDIR/prek-ran" ]
+}
+
+@test "the hook blocks a push of two refs when only one leaks, in either order" {
+  hook_repo
+  git switch -q -c clean
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: clean"
+  git switch -q -c leaky main
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: leaky"
+  push_blocked origin clean leaky
+  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
+  push_blocked origin leaky clean
+  [ -z "$(git ls-remote origin refs/heads/clean refs/heads/leaky)" ]
+  [ ! -f "$BATS_TEST_TMPDIR/prek-ran" ]
+}
+
+@test "the hook scans a tag-only push of an annotated tag" {
+  hook_repo
+  git tag -a -m "release for zebra-host-01" v1
+  push_blocked origin v1
+  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
+  [ -z "$(git ls-remote origin refs/tags/v1)" ]
+  git tag -d v1 >/dev/null
+  git tag -a -m "clean release" v1
+  push_ok origin v1
+}
+
+@test "the hook scans a new branch whose history holds a leak the tip removed" {
+  hook_repo
+  git switch -q -c work
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: add"
+  git rm -q l.md
+  git commit -q -m "chore: remove"
+  push_blocked origin work
+  [[ $output == *"l.md:1: private literal O11Y_SSH_HOST"* ]]
+}
+
+@test "the hook trusts nothing about an origin that was repointed to an empty repository" {
+  hook_repo
+  git switch -q -c work
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: leak"
+  git push -q --no-verify origin work
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: clean child"
+  git remote set-url origin "$work/B.git"
+  push_blocked origin work
+  [ -z "$(git ls-remote "$work/B.git")" ]
+}
+
+@test "the hook covers every push URL of a remote" {
+  hook_repo
+  git switch -q -c work
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: leak"
+  git push -q --no-verify origin work
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: clean child"
+  git remote set-url --push origin "$work/A.git"
+  git remote set-url --add --push origin "$work/B.git"
+  push_blocked origin work
+  [ -z "$(git ls-remote "$work/B.git")" ]
+}
+
+@test "the hook scans author and committer lines" {
+  hook_repo
+  git switch -q -c work
+  echo ok >c.md
+  git add c.md
+  GIT_AUTHOR_NAME=zebra-host-01 git commit -q -m "chore: authored"
+  push_blocked origin work
+  [[ $output == *"commit "*"private literal O11Y_SSH_HOST"* ]]
+  git switch -q -c work2 main
+  echo ok2 >d.md
+  git add d.md
+  GIT_COMMITTER_EMAIL=me@zebra-host-01.example git commit -q -m "chore: committed"
+  push_blocked origin work2
+  [[ $output == *"commit "*"private literal O11Y_SSH_HOST"* ]]
+}
+
+@test "the hook scans a branch name" {
+  hook_repo
+  git switch -q -c zebra-host-01-fix
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: ok"
+  push_blocked origin zebra-host-01-fix
+  [[ $output =~ path#[0-9a-f]{8}:path:\ private\ literal\ O11Y_SSH_HOST ]]
+}
+
+@test "the hook blocks a push when an object is missing" {
+  hook_repo
+  git switch -q -c work
+  echo "a loose blob that is unique" >c.md
+  git add c.md
+  git commit -q -m "chore: c"
+  oid=$(git rev-parse HEAD:c.md)
+  rm "$(git rev-parse --git-path "objects/${oid:0:2}/${oid:2}")"
+  push_blocked origin work
+  [[ $output == *"incomplete"* ]]
+}
+
+@test "a new branch off a destination whose history holds a leak passes when its own commits are clean" {
+  hook_repo
+  git switch -q -c old
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: old leak"
+  git push -q --no-verify origin old:main
+  git switch -q -c fresh
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: clean"
+  push_ok origin fresh
+  echo "second host zebra-host-01" >l2.md
+  git add l2.md
+  git commit -q -m "chore: new leak"
+  push_blocked origin fresh:fresh2
+}
+
+@test "the wrapper skips the check, with a warning, on a branch that predates it" {
+  hook_repo
+  git switch -q -c old
+  rm tools/check-leaks.sh
+  echo "host zebra-host-01" >l.md
+  git add -A
+  git commit -q -m "chore: no checker here"
+  push_ok origin old
+  [[ $output == *"leak check is not present on this branch and was skipped"* ]]
+  [ -f "$BATS_TEST_TMPDIR/prek-ran" ]
+}
+
+@test "deleting a remote branch passes" {
+  hook_repo
+  git push -q origin main:old
+  push_ok origin :old
+}
+
+@test "the check doesn't echo the arguments mise is given" {
+  command -v mise >/dev/null
+  awk '/^\[tasks.lint-leaks\]/ { f = 1 } f && /^$/ { exit } f { print }' "$repo_root/mise.toml" >mise.toml
+  sed -i.bak "s|tools/check-leaks.sh|$checker|" mise.toml
+  mise trust -q "$work/mise.toml"
+  echo ok >zebra-host-01.txt
+  run mise run lint-leaks -- zebra-host-01.txt
+  no_secrets
+  [ "$status" -eq 1 ]
+}
+
+# --- the installer ---------------------------------------------------------------
+
+@test "the installer puts the wrapper in front of prek's hook, and reinstalling keeps it" {
+  hook_repo
+  hooks=$(git rev-parse --git-path hooks)
+  grep -qF 'check-leaks pre-push wrapper' "$hooks/pre-push"
+  grep -qF 'File generated by prek' "$hooks/pre-push.prek"
+  bash tools/install-pre-push.sh --check
+  bash tools/install-pre-push.sh >/dev/null
+  bash tools/install-pre-push.sh --check
+  # prek install parks the wrapper as legacy and writes its own hook.
+  prek install -t pre-push >/dev/null 2>&1
+  run bash tools/install-pre-push.sh --check
+  [ "$status" -eq 1 ]
+  bash tools/install-pre-push.sh >/dev/null
+  bash tools/install-pre-push.sh --check
+  [ ! -e "$hooks/pre-push.legacy" ]
+}
+
+@test "the installer check fails without the wrapper, and is skipped in CI" {
+  hook_repo
+  hooks=$(git rev-parse --git-path hooks)
+  rm "$hooks/pre-push"
+  run bash tools/install-pre-push.sh --check
+  [ "$status" -eq 1 ]
+  CI=true run bash tools/install-pre-push.sh --check
+  [ "$status" -eq 0 ]
+}
+
+@test "the installer refuses to wrap a hook it doesn't know" {
+  hook_repo
+  hooks=$(git rev-parse --git-path hooks)
+  printf '#!/bin/sh\nexit 0\n' >"$hooks/pre-push"
+  run bash tools/install-pre-push.sh
+  [ "$status" -eq 1 ]
+}
+
+@test "the wrapper works from a linked worktree" {
+  hook_repo
+  git worktree add -q -b linked "$BATS_TEST_TMPDIR/linked" main
+  cd "$BATS_TEST_TMPDIR/linked"
+  bash tools/install-pre-push.sh --check
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: leak"
+  push_blocked origin linked
+  [[ $output == *"private literal O11Y_SSH_HOST"* ]]
 }

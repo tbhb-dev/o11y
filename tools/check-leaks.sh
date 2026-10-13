@@ -14,8 +14,8 @@
 #      needs no private values, so it is the only one CI can run.
 #
 # What is scanned: file contents (binary files too, as raw bytes), file
-# paths on their own (both sides of a rename), commit messages, and the
-# messages and targets of annotated tags a push would send.
+# paths on their own, commit objects whole (message, author and committer
+# lines), annotated tag objects whole, and, for a push, the ref names.
 #
 # A finding gives a location and the variable or rule, never the matched
 # text. A location that itself matches a rule, such as a path with a
@@ -26,29 +26,38 @@
 #   check-leaks.sh                 scan the working tree: tracked files and
 #                                  untracked files git does not ignore
 #   check-leaks.sh --staged        scan the index blobs of staged files
-#   check-leaks.sh --range A..B    scan the added lines, the paths and the
-#                                  message of every commit in the range
-#                                  (a merge: what it adds beyond its parents)
-#   check-leaks.sh --pre-push [REMOTE]
-#                                  scan what a push would send that the
-#                                  destination lacks. Fed ref-update lines
-#                                  on stdin, as git feeds a hook, it scans
-#                                  each. prek does not pass them on, so it
-#                                  scans every commit and annotated tag
-#                                  reachable from any local branch or tag
-#                                  that the destination's remote-tracking
-#                                  refs lack. That can include local work
-#                                  the push does not send; it is the narrow
-#                                  set that is safe without the tuples.
+#   check-leaks.sh --range A..B    scan every object the range adds
+#   check-leaks.sh --pre-push [REMOTE [URL]]
+#                                  scan what a push sends. Reads the
+#                                  "local-ref local-oid remote-ref
+#                                  remote-oid" lines git gives a pre-push
+#                                  hook on stdin and, per line, every
+#                                  object reachable from the local oid
+#                                  that the destination lacks. The
+#                                  destination has the line's remote oid
+#                                  and whatever git ls-remote reports for
+#                                  URL, which is asked only when a line is
+#                                  a new ref or names an oid this clone
+#                                  lacks. REMOTE is ignored. With no lines
+#                                  on stdin it scans everything reachable
+#                                  from HEAD, so it reports old history.
 #   check-leaks.sh FILE...         scan exactly those files
 #
-# Exit status: 0 clean, 1 findings, 2 misuse, or a git or read failure.
+# Range and push scans read whole objects through git cat-file, never a
+# diff, so nothing git shows differently from what it sends can hide a
+# value. A missing or unreadable object, a failed git command, a shallow
+# repository, or a count of objects read that differs from the count
+# listed ends the scan with exit 2.
 #
-# Known limits, none of which this tries to solve: a value that is
-# URL-encoded, base64-encoded or otherwise transformed is not found; a
-# value split across lines is not found; a literal under four characters is
-# skipped; and an entry of O11Y_PRIVATE_STRINGS cannot contain a comma.
-# cspell:ignore numstat getline tolower RSTART RLENGTH ACMRT quotepath gitlinks sprintf objecttype objectname
+# Scope: this guards against accidents in a cooperative workflow. It does
+# not catch a value that is URL-encoded, base64-encoded or otherwise
+# transformed, a value split across lines, a literal under four characters,
+# or an entry of O11Y_PRIVATE_STRINGS that contains a comma. It does not
+# stop git push --no-verify, a clone without the hook installed, or text
+# typed into GitHub.
+#
+# Exit status: 0 clean, 1 findings, 2 misuse, or a git or read failure.
+# cspell:ignore objs toread gsub nwant ngot lref loid rref roid getline tolower RSTART RLENGTH ACMRT quotepath gitlinks sprintf objecttype objectname
 set -euo pipefail
 export LC_ALL=C
 
@@ -273,12 +282,6 @@ emit_file() {
   emit_body "$2"
 }
 
-# emit_text LABEL: stdin as records.
-emit_text() {
-  printf '\001%s\n' "$1"
-  awk '{ print NR "\t" $0 }'
-}
-
 # emit_blob LABEL OBJECT: a blob as a file.
 emit_blob() {
   git cat-file blob "$2" >"$tmp/blob"
@@ -333,196 +336,130 @@ emit_staged() {
   emit_raw "$tmp/raw" content
 }
 
-# emit_added: the added lines of a unified or combined diff on stdin, with
-# the new file's line numbers. In a combined diff (a merge) a line counts
-# only when it is new against every parent.
-emit_added() {
-  awk '
-    /^diff --cc / { hunk = 0; cc = 1; printf "\001%s\n", substr($0, 11); next }
-    /^diff --git / { hunk = 0; cc = 0; next }
-    !hunk && !cc && /^\+\+\+ / { p = substr($0, 5); sub(/^b\//, "", p); if (p != "/dev/null") printf "\001%s\n", p; next }
-    /^@@/ {
-      match($0, /^@+/)
-      k = RLENGTH
-      hunk = 1
-      width = k - 1
-      plus = ""
-      for (i = 0; i < width; i++) plus = plus "+"
-      split(substr($(k + 1), 2), a, ",")
-      n = a[1] + 0
+# emit_objects: the object ids in $tmp/objs, one "oid[ path]" per line as
+# rev-list --objects prints them, scanned whole. Every path is scanned as
+# text of its own. Every object is read through one cat-file --batch and
+# scanned in full. A tree is read as well, because the names inside it are
+# what shows a file renamed without any change to its content.
+emit_objects() {
+  awk '!seen[$1]++' "$tmp/objs" >"$tmp/uniq"
+  # Paths, escaped for the record stream.
+  awk 'index($0, " ") { p = substr($0, index($0, " ") + 1); gsub(/\\/, "\\\\", p); print "\002" p }' "$tmp/uniq"
+  awk '{ print $1 }' "$tmp/uniq" | git cat-file --batch-check='%(objectname) %(objecttype)' >"$tmp/types"
+  # Anything but a tree, blob, commit or tag (a "missing" answer included)
+  # is an object the scan could not account for.
+  if awk '$2 != "blob" && $2 != "tree" && $2 != "commit" && $2 != "tag" { bad = 1 } END { exit !bad }' "$tmp/types"; then
+    return 1
+  fi
+  awk '{ print $1 }' "$tmp/types" >"$tmp/toread"
+  git cat-file --batch <"$tmp/toread" >"$tmp/batch"
+  # A header line is "<oid> <type> <size>". Contents can't forge one into a
+  # pass: every line is scanned whichever object it is credited to, and a
+  # count that comes out wrong fails the scan.
+  tr '\0' '\n' <"$tmp/batch" | PATHS=$tmp/uniq TYPES=$tmp/types awk '
+    BEGIN {
+      while ((getline l < ENVIRON["PATHS"]) > 0) {
+        sp = index(l, " ")
+        if (sp) { p = substr(l, sp + 1); gsub(/\\/, "\\\\", p); path[substr(l, 1, sp - 1)] = p }
+      }
+      while ((getline l < ENVIRON["TYPES"]) > 0) {
+        split(l, f, " ")
+        want[f[1]] = f[2]; nwant++
+      }
+    }
+    (NF == 3 && $1 in want && !($1 in got) && $2 == want[$1] && $3 ~ /^[0-9]+$/) {
+      oid = $1
+      got[oid] = 1
+      ngot++
+      n = 0
+      if (($2 == "blob" || $2 == "tree") && path[oid] != "") label = path[oid]
+      else label = $2 " " substr(oid, 1, 7)
+      printf "\001%s\n", label
       next
     }
-    hunk && substr($0, 1, width) ~ /\+/ {
-      if (substr($0, 1, width) == plus) print n "\t" substr($0, width + 1)
-      n++
-    }
+    $2 == "missing" && NF == 2 { missing = 1 }
+    { n++; print n "\t" $0 }
+    END { if (missing || ngot != nwant) exit 3 }
   '
 }
 
-# emit_suppressed COMMIT FILE: whole new blobs for the files whose text
-# git won't diff. A binary file, a file marked -diff in .gitattributes, or
-# one whose old version was binary all show as "-" in numstat, and the
-# patch then holds no lines to scan. A blob with a NUL that git still
-# diffs as text gets the same treatment.
-emit_suppressed() {
-  local t rest p
-  while IFS= read -r -d '' t; do
-    rest=${t#*$'\t'}
-    p=${rest#*$'\t'}
-    if [[ -z $p ]]; then
-      # A rename lists its old and new names as separate fields.
-      IFS= read -r -d '' _
-      IFS= read -r -d '' p
-    fi
-    if git cat-file -e "$1:$p"; then
-      git cat-file blob "$1:$p" >"$tmp/blob"
-      if [[ ${t%%$'\t'*} == - ]] || has_nul "$tmp/blob"; then
-        printf '\001%s\n' "$(esc "$p")"
-        emit_body "$tmp/blob"
-      fi
-    fi
-  done <"$2"
+# add_objects REV-LIST-ARGS...: list the objects git would reach.
+add_objects() {
+  git rev-list --objects "$@" >>"$tmp/objs"
 }
 
-# emit_commits: the commits named on stdin, in the order given. Each
-# contributes its message, its paths, and its added lines, plus the whole
-# new blob of any file whose diff git suppresses.
-emit_commits() {
-  local c parents p
-  while IFS= read -r c; do
-    git log -1 --format=%B "$c" | emit_text "commit ${c:0:7} message"
-    parents=$(git rev-list --parents -n 1 "$c")
-    if [[ $parents == *" "*" "* ]]; then
-      # A merge: scan the whole result of every file it changed against
-      # all parents. That is more than the lines it adds, but it also covers
-      # a file whose textual diff git suppresses.
-      git diff-tree --cc -r --name-only -z --no-commit-id "$c" >"$tmp/names"
-      while IFS= read -r -d '' p; do
-        emit_path "$p"
-        # A path the merge deleted has no blob; one that exists must read.
-        if git cat-file -e "$c:$p"; then
-          git cat-file blob "$c:$p" >"$tmp/blob"
-          printf '\001%s\n' "$(esc "$p")"
-          emit_body "$tmp/blob"
-        fi
-      done <"$tmp/names"
-    else
-      git diff-tree --root -r -M --raw -z --no-commit-id --diff-filter=ACMRT "$c" >"$tmp/raw"
-      emit_raw "$tmp/raw" paths
-      git -c core.quotepath=off diff-tree --root -r -M -p -U0 --no-color --no-ext-diff \
-        --diff-filter=ACMRT --no-commit-id "$c" | emit_added
-      git diff-tree --root -r -M --numstat -z --no-commit-id --diff-filter=ACMRT "$c" >"$tmp/stat"
-      emit_suppressed "$c" "$tmp/stat"
-    fi
-  done
+# Refuse a shallow repository: its boundary commits hide history.
+require_complete() {
+  if [[ $(git rev-parse --is-shallow-repository) != false ]]; then
+    die "the repository is shallow, so the scan can't be complete"
+  fi
 }
 
 emit_range() {
-  git rev-list "$1" >/dev/null
-  git rev-list --reverse "$1" >"$tmp/commits"
-  emit_commits <"$tmp/commits"
+  require_complete
+  : >"$tmp/objs"
+  add_objects "$1"
+  emit_objects
 }
 
-# emit_tag OBJECT: an annotated tag's own text, then what it points at.
-# A tag can point at another tag, a commit, a tree or a blob.
-emit_tag() {
-  local obj=$1 kind rec path sha
-  kind=$(git cat-file -t "$obj")
-  while [[ $kind == tag ]]; do
-    git cat-file tag "$obj" | emit_text "tag ${obj:0:7}"
-    obj=$(git cat-file tag "$obj" | awk '/^object /{ print $2; exit }')
-    kind=$(git cat-file -t "$obj")
-  done
-  case $kind in
-  commit) git rev-list --no-walk "$obj" | emit_commits ;;
-  blob) emit_blob "tagged blob ${obj:0:7}" "$obj" ;;
-  tree)
-    git ls-tree -r -z "$obj" >"$tmp/tree"
-    while IFS= read -r -d '' rec; do
-      path=${rec#*$'\t'}
-      sha=${rec%%$'\t'*}
-      sha=${sha#* * }
-      emit_blob "$path" "$sha"
-    done <"$tmp/tree"
-    ;;
-  esac
-}
-
-# emit_pre_push [REMOTE]: what the push would send that the destination
-# remote lacks. See the usage note at the top for the two input paths.
-#
-# The destination decides what it already has: the remote-tracking refs of
-# the remote this push goes to, plus the remote sha git reports. When the
-# destination can't be matched to a configured remote, nothing is assumed
-# to be there and everything reachable is scanned. An upstream or
-# origin/main never stands in for it.
+# emit_pre_push URL: the lines git gives a pre-push hook are
+# "local-ref local-oid remote-ref remote-oid". For each, scan the objects
+# reachable from the local oid minus those the destination already has.
+# The destination has the line's own remote oid, when that object exists
+# here. When any line is a new ref, or names a remote oid this clone lacks,
+# the destination is asked what it has: git ls-remote against the URL git
+# passed the hook, which is the exact place the push goes. Remote-tracking
+# refs are a cache of some other moment and play no part. If the question
+# fails the scan fails, since the push would too. The URL is never printed.
 emit_pre_push() {
-  local remote=${1:-${PRE_COMMIT_REMOTE_NAME-}} url=${2:-${PRE_COMMIT_REMOTE_URL-}}
-  local name='' manual='' r local_sha remote_sha u
-  local -a args
-  : >"$tmp/tuples"
+  local url=${1-} lref loid rref roid extra count=0 ask='' oid
+  local re='^([0-9a-f]{40}|[0-9a-f]{64})$'
+  require_complete
+  : >"$tmp/objs"
+  : >"$tmp/lines"
+  : >"$tmp/known"
   if [[ ! -t 0 ]]; then
-    while IFS=' ' read -r _ local_sha _ remote_sha || [[ -n ${local_sha-} ]]; do
-      if [[ -n $local_sha ]]; then printf '%s %s\n' "$local_sha" "${remote_sha:-0}" >>"$tmp/tuples"; fi
-      local_sha=
+    while read -r lref loid rref roid extra || [[ -n ${lref-} ]]; do
+      if [[ -z ${lref-} && -z ${loid-} ]]; then continue; fi
+      if [[ -n ${extra-} || ! $loid =~ $re || ! $roid =~ $re ]]; then
+        die "a ref line from git is malformed"
+      fi
+      count=$((count + 1))
+      # Ref names are text that gets published.
+      printf '\002%s\n' "$(esc "$lref")" "$(esc "$rref")"
+      # A deletion sends no objects.
+      if [[ ! $loid =~ ^0+$ ]]; then
+        printf '%s %s\n' "$loid" "$roid" >>"$tmp/lines"
+        if [[ $roid =~ ^0+$ ]] || ! git cat-file -e "$roid"; then ask=1; fi
+      fi
+      lref=
     done
   fi
-  if [[ -z $remote ]]; then manual=1; fi
-  if [[ -n $remote ]]; then
-    git remote >"$tmp/remotes"
-    while IFS= read -r r; do
-      if [[ $r == "$remote" || $(git remote get-url "$r") == "$remote" || $(git remote get-url "$r") == "$url" ]]; then
-        name=$r
-        break
-      fi
-    done <"$tmp/remotes"
-  fi
-  # A remote's tracking refs describe what it fetches from. If pushes go
-  # elsewhere, or the hook was given another URL, they say nothing about
-  # the destination, so assume it has nothing.
-  if [[ -n $name ]]; then
-    if [[ $(git remote get-url "$name") != "$(git remote get-url --push "$name")" ]] ||
-      [[ -n $url && $url != "$(git remote get-url --push "$name")" ]]; then
-      name=
-    fi
-  fi
-  : >"$tmp/tags"
-  : >"$tmp/starts"
-  if [[ -s $tmp/tuples ]]; then
-    while read -r local_sha remote_sha; do
-      # A deletion sends nothing.
-      if [[ $local_sha =~ ^0+$ ]]; then continue; fi
-      args=("$local_sha")
-      if [[ -n $name ]]; then args+=(--not "--remotes=$name"); fi
-      if [[ -z $name && -n $manual ]]; then args+=(--not --remotes); fi
-      if [[ ! $remote_sha =~ ^0+$ ]] && git cat-file -e "$remote_sha^{commit}"; then
-        if [[ -z $name && -z $manual ]]; then args+=(--not); fi
-        args+=("$remote_sha")
-      fi
-      git rev-list --reverse "${args[@]}" >>"$tmp/starts"
-      if [[ $(git cat-file -t "$local_sha") == tag ]]; then printf '%s\n' "$local_sha" >>"$tmp/tags"; fi
-    done <"$tmp/tuples"
+  if ((count == 0)); then
+    add_objects HEAD
   else
-    args=(--branches --tags HEAD)
-    if [[ -n ${PRE_COMMIT_TO_REF-} ]]; then args+=("$PRE_COMMIT_TO_REF"); fi
-    if [[ -n $name ]]; then args+=(--not "--remotes=$name"); fi
-    if [[ -z $name && -n $manual ]]; then args+=(--not --remotes); fi
-    git rev-list --reverse "${args[@]}" >"$tmp/starts"
-    git for-each-ref --format='%(objecttype) %(objectname)' refs/tags >"$tmp/refs"
-    while read -r u r; do
-      if [[ $u == tag ]]; then printf '%s\n' "$r" >>"$tmp/tags"; fi
-    done <"$tmp/refs"
+    if [[ -n $ask && -n $url ]]; then
+      GIT_TERMINAL_PROMPT=0 git ls-remote "$url" >"$tmp/ls"
+      while read -r oid _; do
+        if [[ $oid =~ $re ]] && git cat-file -e "$oid"; then
+          printf '^%s\n' "$oid" >>"$tmp/known"
+        fi
+      done <"$tmp/ls"
+    fi
+    while read -r loid roid; do
+      {
+        printf '%s\n' "$loid"
+        cat "$tmp/known"
+        if [[ ! $roid =~ ^0+$ ]] && git cat-file -e "$roid"; then printf '^%s\n' "$roid"; fi
+      } >"$tmp/revs"
+      git rev-list --objects --stdin <"$tmp/revs" >>"$tmp/objs"
+    done <"$tmp/lines"
   fi
-  awk '!seen[$0]++' "$tmp/starts" >"$tmp/commits"
-  emit_commits <"$tmp/commits"
-  while read -r u; do
-    emit_tag "$u"
-  done <"$tmp/tags"
+  emit_objects
 }
 
 mode=tree
 range=
-remote=
 push_url=
 files=()
 while (($#)); do
@@ -536,13 +473,11 @@ while (($#)); do
     ;;
   --pre-push)
     mode=pre-push
+    # git gives the hook the remote's name, then the URL it pushes to.
+    if (($# > 1)) && [[ $2 != -* ]]; then shift; fi
     if (($# > 1)) && [[ $2 != -* ]]; then
-      remote=$2
+      push_url=$2
       shift
-      if (($# > 1)) && [[ $2 != -* ]]; then
-        push_url=$2
-        shift
-      fi
     fi
     ;;
   -*) die "unknown option" ;;
@@ -562,7 +497,7 @@ case $mode in
 tree) emit_tree >"$tmp/stream" ;;
 staged) emit_staged >"$tmp/stream" ;;
 range) emit_range "$range" >"$tmp/stream" ;;
-pre-push) emit_pre_push "$remote" "$push_url" >"$tmp/stream" ;;
+pre-push) emit_pre_push "$push_url" >"$tmp/stream" ;;
 files)
   for f in "${files[@]}"; do
     [[ -f $f ]] || die "an argument is not a readable file"

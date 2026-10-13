@@ -129,10 +129,11 @@ repos:
         files: ^(vendir\.(yml|lock\.yml)$|\.config/mise/conf\.d/|\.devtools/)
         pass_filenames: false
 
-      # The leak check, at three stages. Staged scans the index blobs, so a
+      # The leak check, at two stages. Staged scans the index blobs, so a
       # private value cannot hide behind a cleaned working file. The message
-      # file arrives as the hook's argument. Pre-push scans the commits a
-      # push sends, which catches a commit made with hooks bypassed.
+      # file arrives as the hook's argument. The pre-push stage isn't here:
+      # prek hides git's ref lines, so tools/install-pre-push.sh puts the
+      # check in front of prek's pre-push hook instead.
       - id: leaks-staged
         name: leak check (staged files)
         entry: mise run lint-leaks -- --staged
@@ -146,14 +147,6 @@ repos:
         entry: mise run lint-leaks --
         language: system
         stages: [commit-msg]
-
-      - id: leaks-outgoing
-        name: leak check (outgoing commits)
-        entry: mise run lint-leaks -- --pre-push
-        language: system
-        stages: [pre-push]
-        always_run: true
-        pass_filenames: false
 
       - id: check-pins
         name: devtools pin agreement
