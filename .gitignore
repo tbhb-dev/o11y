@@ -1,0 +1,16 @@
+.DS_Store
+tmp/
+
+# Secrets and local overrides. mise.local.toml carries internal hostnames,
+# addresses and 1Password references; only mise.local.toml.example is tracked.
+mise.local.toml
+.env
+.env.*
+!.env.example
+
+# Agent worktrees and local harness settings
+.worktrees/
+.claude/worktrees/
+.claude/settings.local.json
+.codex/worktrees/
+.codex/settings.local.json
