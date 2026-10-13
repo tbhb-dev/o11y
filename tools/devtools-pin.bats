@@ -41,3 +41,24 @@ teardown() {
   run bash "$script" "$manifest"
   [ "$status" -eq 1 ]
 }
+
+@test "a mention in another field is not a dependency" {
+  printf '%s\n' 'description: "tbhb-dev/devtools#v0.9.0"' '    - other/pkg#v1.0.0' >"$manifest"
+  run bash "$script" "$manifest"
+  [ "$status" -eq 1 ]
+  [[ $output == *"no active devtools pin"* ]]
+}
+
+@test "trailing text after the tag is rejected" {
+  printf '%s\n' '    - tbhb-dev/devtools#v0.10.0"garbage' >"$manifest"
+  run bash "$script" "$manifest"
+  [ "$status" -eq 1 ]
+  [[ $output == *"not a plain vX.Y.Z tag"* ]]
+}
+
+@test "an inline comment naming another pin is ignored" {
+  printf '%s\n' '    - tbhb-dev/devtools#v0.11.0  # was tbhb-dev/devtools#v0.9.0' >"$manifest"
+  run bash "$script" "$manifest"
+  [ "$status" -eq 0 ]
+  [ "$output" = v0.11.0 ]
+}

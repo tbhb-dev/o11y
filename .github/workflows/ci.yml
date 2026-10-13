@@ -56,14 +56,15 @@ jobs:
           # renovate: datasource=github-releases depName=jdx/mise
           version: 2026.10.3
 
-      # Resyncs the devtools payload into a scratch directory and fails on
-      # any difference from the committed tree, so a vendored file edited in
-      # place or a sync nobody committed is caught before the gates below
-      # run against it. The lint bar runs this same task too; naming it here
-      # makes the failure its own step rather than the first line of a lint
-      # run.
+      # Resyncs the devtools payload in place from vendir.yml, ignoring the
+      # lock's stored SHAs, and fails on any difference from the committed
+      # tree. That catches a vendored file edited in place, a sync nobody
+      # committed, and a manifest bump whose vendir.lock.yml is stale. The
+      # in-place sync is safe on a clean CI checkout. The local lint bar runs
+      # the locked scratch comparison, check-vendored, so it can't overwrite
+      # unstaged edits.
       - name: Check the vendored payload
-        run: mise run check-vendored
+        run: mise run devtools:check-vendored
 
       # mise installs the vale binary but does not fetch the style packages
       # .vale.ini declares.
