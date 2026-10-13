@@ -61,8 +61,7 @@ description = "Install guard-markdown at the version the devtools pin in apm.yml
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
-version=$(grep -oE 'tbhb-dev/devtools#v[0-9]+\.[0-9]+\.[0-9]+' apm.yml | head -n 1 | cut -d'#' -f2)
-[[ -n $version ]] || { echo "no devtools pin found in apm.yml" >&2; exit 1; }
+version=$(bash tools/devtools-pin.sh)
 go install "github.com/tbhb-dev/devtools/cmd/guard-markdown@${version}"
 gobin="$(go env GOPATH)/bin"
 case ":$PATH:" in
@@ -137,11 +136,11 @@ run = [
 # skills call them by name. The scripts are copies of the devtools ones.
 [tasks.lint-draft]
 extends = "devtools:lint-draft"
-run = "bash tools/lint-draft.sh $usage_file"
+run = 'bash tools/lint-draft.sh "$usage_file"'
 
 [tasks.fix-prose-replacements]
 extends = "devtools:fix-prose-replacements"
-run = "uv run --script tools/fix_prose_replacements.py $usage_file"
+run = 'uv run --script tools/fix_prose_replacements.py "$usage_file"'
 
 # Body copied from devtools/mise.toml [tasks.lint-prose]; the glob is why it
 # stays repo-specific. The deployed agent primitives answer to upstream's
@@ -203,9 +202,13 @@ run = [
 description = "Test the vendored-payload drift gate on a copy of the tree"
 run = "bats tools/check-vendored.bats"
 
+[tasks.test-tools]
+description = "Test the devtools pin parser and the prose fixer's failure handling"
+run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
+
 [tasks.test]
 description = "Run every test suite"
-run = ["mise run test-vendored"]
+run = ["mise run test-vendored", "mise run test-tools"]
 
 [tasks.check]
 description = "Fast quality bar: lint then test"

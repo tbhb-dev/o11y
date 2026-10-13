@@ -56,13 +56,14 @@ jobs:
           # renovate: datasource=github-releases depName=jdx/mise
           version: 2026.10.3
 
-      # Resyncs the devtools payload and fails on any difference from the
-      # committed tree, so a vendored file edited in place or a sync nobody
-      # committed is caught before the gates below run against it. The lint
-      # bar runs this too; naming it here makes the failure its own step
-      # rather than the first line of a lint run.
+      # Resyncs the devtools payload into a scratch directory and fails on
+      # any difference from the committed tree, so a vendored file edited in
+      # place or a sync nobody committed is caught before the gates below
+      # run against it. The lint bar runs this same task too; naming it here
+      # makes the failure its own step rather than the first line of a lint
+      # run.
       - name: Check the vendored payload
-        run: mise run devtools:check-vendored
+        run: mise run check-vendored
 
       # mise installs the vale binary but does not fetch the style packages
       # .vale.ini declares.
