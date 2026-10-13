@@ -16,6 +16,9 @@ shfmt = "3.14.1"
 jq = "1.8.2"
 # Runs tools/apm_audit.py, the one Python file this repo needs.
 uv = "0.12.23"
+# The Compose version the deploy host runs, so the local tests load and run
+# the stack with it. The binary is docker-cli-plugin-docker-compose.
+"aqua:docker/compose" = "2.20.1"
 
 [env]
 DEVTOOLS_LOCK_PLATFORMS = "linux-x64,macos-arm64"
@@ -206,9 +209,13 @@ run = "bats tools/check-vendored.bats"
 description = "Test the devtools pin parser and the prose fixer's failure handling"
 run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
 
+[tasks.test-stack]
+description = "Test the release renderer, the S3 probe, validation's isolation, and the shared test helpers"
+run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/validate.bats"
+
 [tasks.test]
 description = "Run every test suite"
-run = ["mise run test-vendored", "mise run test-tools"]
+run = ["mise run test-vendored", "mise run test-tools", "mise run test-stack"]
 
 [tasks.check]
 description = "Fast quality bar: lint then test"
@@ -217,3 +224,29 @@ run = ["mise run lint", "mise run test"]
 [tasks.check-all]
 description = "Deeper bar: check plus the full-history gitleaks scan"
 run = ["mise run check", "mise run devtools:gitleaks"]
+
+# The stack tasks below need a Docker engine. They set every O11Y_* value
+# themselves, with placeholders, so they behave the same with or without
+# mise.local.toml.
+[tasks.render]
+description = "Render a release with placeholder values into tmp/render"
+env = { O11Y_DATA_DIR = "/srv/o11y/data", O11Y_GRAFANA_ROOT_URL = "https://grafana.example.ts.net/" }
+run = "bash tools/render.sh tmp/render"
+
+[tasks.validate]
+description = "Load the Compose models and run each component's config check from its pinned image"
+run = "bash tools/validate.sh"
+
+# The safe way to read a resolved model: `config` without -q prints the
+# contents of every env file a model loads, and this one loads only a dummy.
+[tasks.compose-config]
+description = "Print the resolved Compose models as JSON, rendered with placeholders and a dummy S3 env file"
+run = "bash tools/validate.sh --model"
+
+[tasks.rustfs-probe]
+description = "Exercise RustFS alone: credentials, multipart, listing and recovery after a kill"
+run = "bash tools/rustfs-probe.sh"
+
+[tasks.smoke]
+description = "Boot the stack from clean and prove it stores and returns telemetry"
+run = "bash tools/smoke.sh"

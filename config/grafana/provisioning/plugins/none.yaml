@@ -1,0 +1,4 @@
+---
+# Nothing is provisioned here. The file exists so Grafana finds the directory
+# and does not log an error on every start.
+apiVersion: 1

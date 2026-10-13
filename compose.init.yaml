@@ -1,0 +1,27 @@
+---
+# The one-shot that prepares the data directory before every `up`: it creates
+# the per-service directories with their owners and generates the secrets
+# once. It lives in its own file so it can run on a clean host: compose.yaml
+# names a generated secret as an env_file, which Compose resolves at load
+# time. This file references no generated file.
+#
+#   docker-compose -p o11y -f compose.init.yaml --env-file .env run --rm init
+name: o11y
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: "3"}
+
+services:
+  init:
+    image: rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c
+    user: "0:0"
+    network_mode: none
+    restart: "no"
+    logging: *logging
+    entrypoint: ["/bin/sh", "/init/init.sh"]
+    environment:
+      O11Y_SECRETS_OWNER: ${O11Y_SECRETS_OWNER:-0:0}
+    volumes:
+      - ${O11Y_CONFIG_INIT:?}:/init:ro
+      - ${O11Y_DATA_DIR:?}:/data
