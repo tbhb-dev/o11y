@@ -1,0 +1,219 @@
+#:schema https://mise.jdx.dev/schema/mise.json
+# The repo-specific half of the task and toolchain definitions. The shared
+# half arrives through vendir: tool pins in .config/mise/conf.d/, tasks
+# under .devtools/tasks/ selected by the task_config includes below.
+
+[settings]
+lockfile = true
+# uv owns any Python interpreter; stop mise from reading .python-version too.
+idiomatic_version_file_enable_tools = []
+
+[tools]
+# vendir can't come from the payload it delivers: bootstrap syncs before it installs.
+vendir = "0.46.1"
+apm = "0.33.0"
+shfmt = "3.14.1"
+jq = "1.8.2"
+# Runs tools/apm_audit.py, the one Python file this repo needs.
+uv = "0.12.23"
+
+[env]
+DEVTOOLS_LOCK_PLATFORMS = "linux-x64,macos-arm64"
+UV_PYTHON_PREFERENCE = "only-managed"
+
+[task_config]
+includes = [
+  ".devtools/tasks/fix.toml",
+  ".devtools/tasks/format.toml",
+  ".devtools/tasks/git-hooks.toml",
+  ".devtools/tasks/lint.toml",
+  ".devtools/tasks/pins.toml",
+  ".devtools/tasks/preapproval.toml",
+  ".devtools/tasks/security.toml",
+  ".devtools/tasks/toolchain.toml",
+  ".devtools/tasks/vendir.toml",
+]
+
+[tasks.bootstrap]
+description = "Sync the vendored payload, install the toolchain, and install git hooks"
+alias = "setup"
+run = [
+  "vendir sync",
+  "mise run install-toolchain",
+  "mise run install-tools",
+  "mise run install-guard-markdown",
+  "mise run devtools:prek-install",
+]
+
+[tasks.install-toolchain]
+description = "Install the pinned toolchain from mise.toml and the vendored conf.d"
+run = "mise install"
+
+[tasks.install-tools]
+description = "Download the Vale style packages .vale.ini names"
+run = "vale sync"
+
+# guard-markdown backs lint-markdown-wrap and the Claude write hook, and mise
+# has no pin for it. The version comes from the devtools pin in apm.yml, the
+# site devtools:update-pins moves, so a pin bump moves this install too.
+[tasks.install-guard-markdown]
+description = "Install guard-markdown at the version the devtools pin in apm.yml names"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+version=$(bash tools/devtools-pin.sh)
+go install "github.com/tbhb-dev/devtools/cmd/guard-markdown@${version}"
+gobin="$(go env GOPATH)/bin"
+case ":$PATH:" in
+  *":$gobin:"*) ;;
+  *) echo "add $gobin to PATH so guard-markdown resolves" >&2 ;;
+esac
+'''
+
+[tasks.check-vendored]
+description = "Fail when the vendored payload differs from what vendir.lock.yml pins, without touching the checkout"
+run = "bash tools/check-vendored.sh"
+
+# APM merges hook declarations into each harness's settings additively and
+# never reconciles, while `apm audit --ci` replays the same merge from an
+# empty tree and compares. Clearing the keys APM owns first hands the
+# merge the empty slate its replay assumes. Only those keys go, so a
+# hand-written setting elsewhere in each file survives. devtools:update-pins
+# calls this task by name.
+[tasks.apm-sync]
+description = "Redeploy the APM primitives from a cleared hook state, then audit"
+depends_post = ["lint-apm", "lint-apm-deploy"]
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+clear_key() {
+  local file=$1 key=$2
+  [[ -f $file ]] || return 0
+  jq "del(.$key)" "$file" >"$file.tmp"
+  mv "$file.tmp" "$file"
+  [[ $(jq 'length' "$file") -gt 0 ]] || rm -f "$file"
+}
+clear_key .claude/settings.json hooks
+clear_key .codex/hooks.json hooks
+rm -f .claude/apm-hooks.json .codex/apm-hooks.json
+apm install
+'''
+
+# `apm audit --ci` replays the install into a scratch tree and diffs it
+# against the deployed files. APM scans each harness root whole, which
+# crosses into the agent worktrees under .claude/ and .codex/, so the
+# wrapper excludes Unicode findings inside registered worktrees and keeps
+# every other check.
+[tasks.lint-apm]
+description = "Check the deployed APM primitives against apm.lock.yaml"
+run = "uv run --no-project --python 3.14 python tools/apm_audit.py"
+
+# The bare devtools pin plus `target: [claude, codex]` is assumed to
+# deploy the claude, common, and codex packages and nothing for
+# antigravity (D13). This holds that assumption to the recorded deploy.
+[tasks.lint-apm-deploy]
+description = "Fail when the deployed APM primitives differ from the recorded frozen-consumer set"
+run = "bash tools/check-apm-deploy.sh"
+
+[tasks.lint-commit-msg]
+extends = "devtools:lint-commit-msg"
+
+[tasks.lint-squash-msg]
+extends = "devtools:lint-squash-msg"
+
+# The pull request counterpart the pr skill calls. Body copied from
+# devtools/mise.toml [tasks.lint-pr-description]; validate-description.sh
+# exists once apm install has deployed the pr skill.
+[tasks.lint-pr-description]
+extends = "devtools:lint-pr-description"
+run = [
+  "bash .claude/skills/pr/scripts/validate-description.sh",
+  "vale --output=ai-tells-agent.tmpl PR_AGENTDESC.md",
+  "cspell --config .cspell.jsonc --no-summary --no-progress PR_AGENTDESC.md",
+]
+
+# Both draft tasks are scoped to the one file they receive. The fix-prose
+# skills call them by name. The scripts are copies of the devtools ones.
+[tasks.lint-draft]
+extends = "devtools:lint-draft"
+run = 'bash tools/lint-draft.sh "$usage_file"'
+
+[tasks.fix-prose-replacements]
+extends = "devtools:fix-prose-replacements"
+run = 'uv run --script tools/fix_prose_replacements.py "$usage_file"'
+
+# Body copied from devtools/mise.toml [tasks.lint-prose]; the glob is why it
+# stays repo-specific. The deployed agent primitives answer to upstream's
+# prose, so the harness skill and rule trees are excluded.
+[tasks.lint-prose]
+extends = "devtools:lint-prose"
+run = "vale --output=ai-tells-agent.tmpl --glob='!{LICENSE,CHANGELOG.md,.vale/*,tmp/*,apm_modules/*,.claude/skills/*,.claude/rules/*,.agents/skills/*,.claude/worktrees/*,.codex/worktrees/*,.worktrees/*,COMMIT_AGENTMSG,PR_AGENTDESC.md,SQUASH_AGENTMSG}' $usage_paths"
+
+[tasks.lint-markdown-wrap]
+description = "Fail if any Markdown paragraph spans more than one line"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+files=$(git ls-files '*.md' ':!:CHANGELOG.md')
+if [[ -n $files ]]; then guard-markdown $files; fi
+'''
+
+# Two tasks, not one: the fix-pr skill maps a failing "shell" check to
+# `mise run lint-shell && mise run lint-shell-fmt` (fix-pr/scripts/diagnose.sh).
+[tasks.lint-shell]
+description = "Lint the shell scripts via shellcheck"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+files=$(git ls-files --cached --others --exclude-standard -- '*.sh' ':!:.claude/**' ':!:.agents/**')
+[[ -z $files ]] || shellcheck $files
+'''
+
+[tasks.lint-shell-fmt]
+description = "Fail if shfmt would reformat any shell script"
+run = '''
+#!/usr/bin/env bash
+set -euo pipefail
+files=$(git ls-files --cached --others --exclude-standard -- '*.sh' ':!:.claude/**' ':!:.agents/**')
+[[ -z $files ]] || shfmt -d $files
+'''
+
+[tasks.lint]
+extends = "devtools:lint"
+run = [
+  "mise run check-vendored",
+  "mise run devtools:check-pins",
+  "mise run lint-apm",
+  "mise run lint-apm-deploy",
+  "mise run lint-prose",
+  "mise run devtools:lint-spelling",
+  "mise run devtools:lint-markdown",
+  "mise run lint-markdown-wrap",
+  "mise run devtools:lint-config",
+  "mise run devtools:lint-yaml",
+  "mise run devtools:lint-toml",
+  "mise run devtools:lint-workflows",
+  "mise run devtools:lint-mise",
+  "mise run lint-shell",
+  "mise run lint-shell-fmt",
+]
+
+[tasks.test-vendored]
+description = "Test the vendored-payload drift gate on a copy of the tree"
+run = "bats tools/check-vendored.bats"
+
+[tasks.test-tools]
+description = "Test the devtools pin parser and the prose fixer's failure handling"
+run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
+
+[tasks.test]
+description = "Run every test suite"
+run = ["mise run test-vendored", "mise run test-tools"]
+
+[tasks.check]
+description = "Fast quality bar: lint then test"
+run = ["mise run lint", "mise run test"]
+
+[tasks.check-all]
+description = "Deeper bar: check plus the full-history gitleaks scan"
+run = ["mise run check", "mise run devtools:gitleaks"]

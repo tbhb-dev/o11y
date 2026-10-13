@@ -1,0 +1,22 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+
+  // The repository-level policy comes from the shared devtools preset:
+  // its rules, grouping, and the custom managers for pin sites no built-in
+  // manager reads. It's pinned to a commit, and the trailing version
+  // comment is what devtools:check-pins and devtools:update-pins read.
+  //
+  // The global-only options (identity, limits, requireConfig) are inlined
+  // here rather than taken from globalExtends, which Renovate resolves
+  // before host rules exist, so that fetch would run unauthenticated.
+  requireConfig: "ignored",
+  username: "tbhb-dev-renovate[bot]",
+  gitAuthor: "tbhb-dev-renovate[bot] <289255489+tbhb-dev-renovate[bot]@users.noreply.github.com>",
+  prConcurrentLimit: 0,
+  prHourlyLimit: 0,
+  extends: [
+    "github>tbhb-dev/devtools//.github/renovate-config.json5#d80265aa04fd10bbfe3965200ddbe3d5d1563c38", // v0.10.0
+  ],
+
+  repositories: ["tbhb-dev/o11y"],
+}

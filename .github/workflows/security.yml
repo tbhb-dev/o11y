@@ -1,0 +1,58 @@
+---
+# Secret scanning. gitleaks walks the full commit history and the working
+# tree against its bundled rule set, so a credential committed anywhere in
+# the repo's past fails the gate. Runs on every pull request and push to
+# `main`, plus a daily cron that catches rules added to gitleaks after a
+# commit merged. The gate is the shared `devtools:gitleaks` task, which
+# pins the binary through the vendored payload and asserts the walk
+# reached a commit -- gitleaks otherwise exits 0 on a git failure and an
+# empty scan reads as a clean one.
+
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "26 6 * * *"
+
+permissions:
+  contents: read
+
+# See ci.yml: without this a pin can move without its lockfile entry.
+env:
+  MISE_LOCKED: "1"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gitleaks:
+    name: gitleaks
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so gitleaks scans every commit's diff, not just
+          # the checkout tip.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Installs gitleaks at the version and digest the vendored payload
+      # pins, the same way every other gate here resolves its binary.
+      - name: Set up the toolchain
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.3
+
+      - name: Scan for committed secrets
+        run: mise run devtools:gitleaks

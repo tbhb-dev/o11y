@@ -1,0 +1,31 @@
+{
+  "language": "en",
+  "ignorePaths": [
+    "**/*.log",
+    // Agent primitives deployed from tbhb-dev/devtools and pinned by
+    // content hash in apm.lock.yaml. Their vocabulary is upstream's.
+    ".agents/skills/**/*",
+    ".claude/rules/**/*",
+    ".claude/skills/**/*",
+    ".claude/worktrees/**/*",
+    ".worktrees/**/*",
+    ".codex/worktrees/**/*",
+    // The vendored devtools payload answers to the publisher's dictionary.
+    ".config/mise/**/*",
+    ".devtools/**/*",
+    ".rumdl_cache/**/*",
+    ".vale/**/*",
+    "apm.lock.yaml",
+    "mise.lock",
+    "tmp/**/*",
+    "vendir.lock.yml"
+  ],
+  "dictionaryDefinitions": [
+    {
+      "name": "o11y",
+      "path": "./.cspell-words.txt",
+      "addWords": true
+    }
+  ],
+  "dictionaries": ["o11y"]
+}

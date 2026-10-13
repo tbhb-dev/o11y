@@ -1,0 +1,22 @@
+#:tombi schema.strict = false
+# The published Codex schema types `permissions` as a bare object, which
+# tombi's strict mode reads as allowing no keys at all. Codex documents
+# named profiles under it, and loads the one below.
+
+# Codex's sandbox for this repository: the workspace plus agent worktrees,
+# git metadata, and GitHub.
+default_permissions = "o11y"
+
+[permissions.o11y]
+extends = ":workspace"
+
+[permissions.o11y.filesystem.":workspace_roots"]
+".codex/worktrees" = "write"
+".git" = "write"
+
+[permissions.o11y.network]
+enabled = true
+
+[permissions.o11y.network.domains]
+"api.github.com" = "allow"
+"github.com" = "allow"

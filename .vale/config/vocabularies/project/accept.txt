@@ -1,0 +1,17 @@
+cspell
+devtools
+toolchain
+[Vv]endor(ed|ing)
+worktrees?
+Alloy
+agy
+Grafana
+Loki
+Mimir
+Tempo
+gitignored
+hostnames?
+prek
+rebase
+tailnet
+vendir
