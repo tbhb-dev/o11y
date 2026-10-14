@@ -122,28 +122,40 @@ expect_status() {
 
 # sentinel_absent <sentinel> <name=path>...: fails when a file or directory
 # holds the sentinel, naming each place on stderr and never the value. A
-# place that is missing, empty or unreadable also fails: a search that could
-# not look is not a clean result.
+# place that could not show anything also fails, because a search that had
+# nothing to look at is not a clean result: a missing or unreadable path, an
+# empty file, or a directory without a single non-empty file.
 sentinel_absent() {
-  local sentinel=$1 place path status found=0
+  local sentinel=$1 place name path files status found=0
   shift
   for place in "$@"; do
-    path=${place#*=}
+    name=${place%%=*} path=${place#*=}
     if [[ -f $path && ! -s $path ]]; then
-      echo "FAIL ${place%%=*} is empty, so it cannot be searched" >&2
+      echo "FAIL $name is empty, so it cannot be searched" >&2
       found=1
       continue
+    fi
+    if [[ -d $path ]]; then
+      if ! files=$(find "$path" -type f -size +0 2>/dev/null); then
+        echo "FAIL $name could not be searched" >&2
+        found=1
+        continue
+      elif [[ -z $files ]]; then
+        echo "FAIL $name holds no non-empty file, so it cannot be searched" >&2
+        found=1
+        continue
+      fi
     fi
     status=0
     grep -rqF -- "$sentinel" "$path" 2>/dev/null || status=$?
     case $status in
     0)
-      echo "FAIL a sentinel secret is in ${place%%=*}" >&2
+      echo "FAIL a sentinel secret is in $name" >&2
       found=1
       ;;
     1) ;;
     *)
-      echo "FAIL ${place%%=*} could not be searched" >&2
+      echo "FAIL $name could not be searched" >&2
       found=1
       ;;
     esac

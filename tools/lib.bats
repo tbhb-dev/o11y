@@ -65,6 +65,33 @@ teardown() {
   [ "$output" = "FAIL a container log could not be searched" ]
 }
 
+@test "an empty directory fails, because nothing was collected" {
+  mkdir "$dir/empty"
+  run sentinel_absent "$secret" "${places[@]}" "the rendered source copy=$dir/empty"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL the rendered source copy holds no non-empty file, so it cannot be searched" ]
+}
+
+@test "a directory of empty files fails, because nothing was collected" {
+  mkdir "$dir/hollow"
+  : >"$dir/hollow/a"
+  : >"$dir/hollow/b"
+  run sentinel_absent "$secret" "${places[@]}" "the rendered source copy=$dir/hollow"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL the rendered source copy holds no non-empty file, so it cannot be searched" ]
+}
+
+@test "a directory that cannot be listed fails as unsearchable" {
+  [ "$(id -u)" -ne 0 ] || skip "root lists any directory"
+  mkdir -p "$dir/locked/inner"
+  echo data >"$dir/locked/inner/f"
+  chmod 000 "$dir/locked/inner"
+  run sentinel_absent "$secret" "${places[@]}" "the rendered config=$dir/locked"
+  chmod 700 "$dir/locked/inner"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL the rendered config could not be searched" ]
+}
+
 @test "an empty file fails, because nothing was collected" {
   : >"$dir/processes.log"
   run sentinel_absent "$secret" "${places[@]}"
