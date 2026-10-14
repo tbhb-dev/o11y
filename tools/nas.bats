@@ -30,6 +30,15 @@ if [ -n "${STUB_SSH_RESOLVE_FAIL:-}" ]; then
   echo "ssh: Could not resolve hostname $O11Y_SSH_HOST: Name or service not known" >&2
   exit 255
 fi
+if [ -n "${STUB_SSH_RESOLVE_FAIL_ON:-}" ]; then
+  # shellcheck disable=SC2254 # the variable is a pattern
+  case $command in
+  $STUB_SSH_RESOLVE_FAIL_ON)
+    echo "ssh: Could not resolve hostname $O11Y_SSH_HOST: Name or service not known" >&2
+    exit 255
+    ;;
+  esac
+fi
 if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
   # shellcheck disable=SC2254 # the variable is a pattern
   case $command in $STUB_SSH_FAIL_ON) exit 255 ;; esac
@@ -209,8 +218,15 @@ echo "rustfs-probe.sh $*" >>"$STUB/tools.log"
 [ -z "${STUB_PROBE_FAIL:-}" ]
 STUB
 
+  # STUB_SLOW_TEE holds tee back a second, the way a busy terminal or a
+  # slow filter would.
+  stub "$dir/bin/tee" <<'STUB'
+[ -z "${STUB_SLOW_TEE:-}" ] || sleep 1
+exec "$STUB_TEE" "$@"
+STUB
   STUB_TAR=$(command -v tar)
-  export STUB=$dir STUB_TAR PATH="$dir/bin:$PATH"
+  STUB_TEE=$(command -v tee)
+  export STUB=$dir STUB_TAR STUB_TEE PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
@@ -1212,4 +1228,45 @@ two_deploys() {
   [[ $output == *'GF_SERVER_ROOT_URL=https://grafana.$O11Y_TAILNET_DOMAIN/'* ]] || false
   [[ $output != *sentinel-net* ]] || false
   grep -q "https://grafana.sentinel-net.example.ts.net/" "$repo/tmp/deploy/logs.log"
+}
+
+# --- hardening ------------------------------------------------------------
+
+@test "all a task prints has reached its output by the time the task exits" {
+  STUB_SLOW_TEE=1 bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
+  grep -q "No serve config" "$dir/terminal"
+  # The exit status is the task's own.
+  set +e
+  STUB_SLOW_TEE=1 O11Y_REMOTE_TAILSCALE=tailscale bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
+  code=$?
+  set -e
+  [ "$code" -eq 1 ]
+  grep -q "O11Y_REMOTE_TAILSCALE" "$dir/terminal"
+}
+
+@test "the tasks that change the host show SSH errors without the host alias" {
+  export O11Y_SSH_HOST=sentinel-host
+  healthy o11y
+  go deploy
+  for task in deploy rollback down; do
+    rm -f "$remote/.deploy.lock"
+    STUB_SSH_RESOLVE_FAIL_ON="*readlink*" go "$task"
+    [ "$status" -ne 0 ]
+    [[ $output == *'Could not resolve hostname $O11Y_SSH_HOST'* ]] || false
+    [[ $output != *sentinel-host* ]] || false
+    grep -q sentinel-host "$repo/tmp/deploy/$task.log"
+  done
+  rmdir "$remote/.deploy.lock" 2>/dev/null || true
+  STUB_SSH_RESOLVE_FAIL_ON="*ps -aq*" go gate-clean
+  [ "$status" -ne 0 ]
+  [[ $output == *'Could not resolve hostname $O11Y_SSH_HOST'* ]] || false
+  [[ $output != *sentinel-host* ]] || false
+}
+
+@test "deploy-plan prints the real values it asks the owner to approve" {
+  export O11Y_TAILNET_DOMAIN=sentinel-net.example.ts.net
+  nas deploy-plan
+  [ "$status" -eq 0 ]
+  [[ $output == *"https://grafana.sentinel-net.example.ts.net/"* ]] || false
+  [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
 }

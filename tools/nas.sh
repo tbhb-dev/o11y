@@ -46,11 +46,10 @@
 #
 # Output is variable names, release ids and pass or fail lines. What the
 # remote commands print goes to tmp/deploy/<task>.log, which is private.
-# Where a task shows remote output, such as versions, the serve
-# configuration, container logs or an SSH error, it first replaces the
-# deployment's paths, names and tailnet addresses with placeholders.
-# deploy-plan and grafana-password are the only tasks that print private
-# values.
+# Everything a task prints, such as versions, the serve configuration,
+# container logs or an SSH error, has the deployment's paths, names and
+# tailnet addresses replaced with placeholders first. deploy-plan and
+# grafana-password are the only tasks that print private values.
 # Never add `set -x`: the commands hold deployment paths.
 set -euo pipefail
 umask 077
@@ -937,6 +936,32 @@ preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-
   ;;
 esac
 
+# Everything a task prints, remote and SSH diagnostics included, goes
+# through redact, and the raw text goes to the task log. The task runs as a
+# child whose output is piped through the filter; this shell waits for the
+# whole pipeline, so nothing is lost when the task ends, and exits with the
+# task's status. The filter ignores INT and TERM so it outlives the task's
+# own cleanup. Two tasks print unfiltered: deploy-plan shows the owner the
+# real values a deploy will use, which is what the owner approves, and
+# grafana-password prints the one password by design.
+case $task in
+deploy-plan | grafana-password) ;;
+*)
+  log=tmp/deploy/$task.log
+  if [[ -z ${O11Y_NAS_FILTERED:-} ]]; then
+    mkdir -p tmp/deploy
+    : >"$log"
+    trap : INT TERM
+    set +e
+    O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" 2>&1 | (
+      trap '' INT TERM
+      tee -a "$log" | redact
+    )
+    exit "${PIPESTATUS[0]}"
+  fi
+  ;;
+esac
+
 case $task in
 preflight) need host dir docker compose tailscale ports ;;
 deploy-plan) need dir docker compose domain ports ;;
@@ -949,16 +974,11 @@ smoke-remote) need domain ;;
 grafana-password) need host docker ;;
 esac
 
-if [[ $task != smoke-remote && $task != grafana-password ]]; then
+if [[ $task == deploy-plan ]]; then
   mkdir -p tmp/deploy
   log=tmp/deploy/$task.log
   : >"$log"
 fi
-# The tasks that show remote output send all of it, remote and SSH
-# diagnostics included, through redact; the raw text goes to the task log.
-case $task in
-preflight | status | logs | serve-apply | serve-status | serve-clear) exec > >(tee -a "$log" | redact) 2>&1 ;;
-esac
 exec 9>&2
 trap cleanup EXIT
 trap 'exit 130' INT
