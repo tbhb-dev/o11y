@@ -217,7 +217,12 @@ s3probe default-credentials || die "2: the default login was not refused as an u
 # Once the store holds data, a damaged key must stop init, not be replaced.
 truncate_secret rustfs.secret_key
 before=$(fingerprint)
-! init || die "2: init replaced a damaged key of a store that holds data"
+# Only init's own refusal counts, not a run that never started.
+if COMPOSE_IGNORE_ORPHANS=1 dc -f "$release/compose.init.yaml" run --rm -T init >"$out/init.log" 2>&1; then
+  die "2: init replaced a damaged key of a store that holds data"
+fi
+grep -qF 'rustfs.secret_key is missing or damaged and /data/rustfs/.rustfs.sys already exists' "$out/init.log" ||
+  die "2: init failed, but not by refusing to replace the damaged key"
 [[ $(fingerprint) == "$before" ]] || die "2: a refused init still changed a file"
 seed rustfs.secret_key "$sentinel_secret"
 { init && seeded; } || die "2: the sentinel key could not be restored"

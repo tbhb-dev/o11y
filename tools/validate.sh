@@ -103,13 +103,39 @@ validator() {
   esac
 }
 
+# What each component must say when it rejects its fixture: the broken key,
+# or the undefined component, that the fixture contains.
+rejection() {
+  case $1 in
+  loki) echo "field not_a_loki_section not found" ;;
+  tempo) echo "field not_a_tempo_section not found" ;;
+  mimir) echo "field not_a_mimir_section not found" ;;
+  alloy) echo 'component "otelcol.exporter.otlp.missing.input" does not exist' ;;
+  esac
+}
+
 for component in loki tempo mimir alloy; do
   if ! validator "$component" valid; then
     echo "FAIL $component: the real config was rejected" >&2
     cat "$log" >&2
     failed=1
-  elif validator "$component" invalid; then
+    continue
+  fi
+  # Only the component's own rejection counts. Docker exits 125 to 127 when
+  # a container cannot start, and above 128 on a signal; neither shows that
+  # the validator ran, so neither may pass for a rejection.
+  status=0
+  validator "$component" invalid || status=$?
+  if [[ $status -eq 0 ]]; then
     echo "FAIL $component: no coverage, the invalid fixture was accepted" >&2
+    failed=1
+  elif [[ $status -ge 125 ]]; then
+    echo "FAIL $component: the validator did not run on the invalid fixture (exit $status)" >&2
+    cat "$log" >&2
+    failed=1
+  elif ! grep -qF -- "$(rejection "$component")" "$log"; then
+    echo "FAIL $component: the invalid fixture failed without naming what is broken in it" >&2
+    cat "$log" >&2
     failed=1
   else
     ok "$component: valid accepted, invalid rejected"
