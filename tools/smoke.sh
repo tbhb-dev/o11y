@@ -206,7 +206,7 @@ buckets=$(s3probe buckets | sort)
 s3probe delete-bucket mimir-ruler
 [[ $(main run --rm -T s3-buckets 2>&1 | bucket_log) == "bucket loki exists;bucket mimir-blocks exists;bucket mimir-ruler created;bucket tempo exists;" ]] ||
   die "2: a run after a partial bootstrap did not create exactly the missing bucket"
-[[ $(s3probe buckets | sort | grep -v '^mimir-ruler') == $(grep -v '^mimir-ruler' <<<"$buckets") ]] ||
+[[ $(s3probe buckets | sort | grep -v '^mimir-ruler') == "$(grep -v '^mimir-ruler' <<<"$buckets")" ]] ||
   die "2: completing a partial bootstrap recreated an existing bucket"
 # A missing dependency can still boot by luck, so the model is checked too.
 jq -e '[.services["loki", "tempo", "mimir"].depends_on["s3-buckets"].condition] == ["service_completed_successfully", "service_completed_successfully", "service_completed_successfully"]
