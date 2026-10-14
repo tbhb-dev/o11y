@@ -996,9 +996,10 @@ two_deploys() {
   two_deploys
   go rollback --previous
   [ "$status" -eq 0 ]
+  # Both new links first, then both renames, in one remote command.
   in_order "-f $remote/releases/$first/compose.yaml up -d" "exec -i o11y-rustfs-1 curl" \
-    "ln -sfn releases/$second previous.new && mv -T previous.new previous" \
-    "ln -sfn releases/$first current.new && mv -T current.new current"
+    "cd $remote && ln -sfn releases/$first current.new && ln -sfn releases/$second previous.new && mv -T previous.new previous && mv -T current.new current"
+  [ "$(grep -c 'current.new' "$dir/ssh.log")" -eq 1 ]
   [ "$(readlink "$remote/current")" = "releases/$first" ]
   [ "$(readlink "$remote/previous")" = "releases/$second" ]
   # The next deploy keeps the restored release as previous.
@@ -1138,4 +1139,32 @@ two_deploys() {
   grep -q '<tailnet address>' "$dir/output"
   # The raw output is kept in the private task logs.
   grep -q sentinel-net "$repo/tmp/deploy/serve-status.log"
+}
+
+# --- review round 2 -------------------------------------------------------
+
+@test "a rollback swap cut off by the connection keeps the lock and names both releases" {
+  two_deploys
+  STUB_SSH_FAIL_ON="*current.new && ln -sfn*" go rollback --previous
+  [ "$status" -ne 0 ]
+  [[ $output == *"the pointer swap may not have finished, so the lock stays"* ]]
+  [[ $output == *"current should name release $first and previous release $second"* ]]
+  [[ $output != *"$remote"* ]]
+  [ -d "$remote/.deploy.lock" ]
+  ! recorded "rmdir $remote/.deploy.lock" || false
+  # A retry finds the lock and starts nothing.
+  rm "$dir/ssh.log"
+  go rollback --previous
+  [ "$status" -ne 0 ]
+  [[ $output == *"the lock exists"* ]]
+  ! recorded " up " || false
+}
+
+@test "a rollback swap interrupted by a signal keeps the lock and names both releases" {
+  two_deploys
+  STUB_SIGNAL_ON="*current.new && ln -sfn*" go rollback --previous
+  [ "$status" -ne 0 ]
+  [[ $output == *"current should name release $first and previous release $second"* ]]
+  [ -d "$remote/.deploy.lock" ]
+  ! recorded "rmdir $remote/.deploy.lock" || false
 }

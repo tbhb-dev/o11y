@@ -74,6 +74,7 @@ http_port=${O11Y_OTLP_HTTP_PORT:-4318}
 log=/dev/null
 locked=0
 gate_release=
+swap_pending=
 model=
 
 # --- validation -----------------------------------------------------------
@@ -190,6 +191,19 @@ current_cmd() {
   echo "cd $dir && ln -sfn releases/$1 current.new && mv -T current.new current"
 }
 
+# swap_cmd <new current> <new previous or nothing>: both pointer moves in
+# one remote command. Both new links exist before either rename, and the
+# remote shell finishes the two renames even when the local side dies or
+# the connection drops, since it has no terminal to lose.
+swap_cmd() {
+  local cmd="cd $dir && ln -sfn releases/$1 current.new"
+  if [[ -n $2 && $2 != "$1" ]]; then
+    echo "$cmd && ln -sfn releases/$2 previous.new && mv -T previous.new previous && mv -T current.new current"
+  else
+    echo "$cmd && mv -T current.new current"
+  fi
+}
+
 # gate_down_cmd <gate release dir>: stops the o11y-gate project. Compose
 # 2.20.1's `down` leaves one-off `run` containers, such as an s3probe that a
 # failed probe left behind, unless it removes orphans. That is safe here
@@ -225,7 +239,14 @@ cleanup() {
     quiet remote "$(gate_down_cmd "$gate_release")" ||
       echo "FAIL $task: the o11y-gate project could not be stopped" >&9
   fi
-  if [[ $locked -eq 1 ]]; then
+  if [[ -n $swap_pending ]]; then
+    # The swap may have stopped halfway, so the lock stays until someone
+    # has looked at the two pointers.
+    # shellcheck disable=SC2086 # two ids
+    set -- $swap_pending
+    echo "FAIL $task: the pointer swap may not have finished, so the lock stays. On the host, current should name release $1 and previous release ${2:-none}. Check both links in O11Y_REMOTE_DIR, set them to those releases if they differ, then remove .deploy.lock" >&9
+    ((status != 0)) || status=1
+  elif [[ $locked -eq 1 ]]; then
     if ((status >= 128)); then
       echo "FAIL $task: interrupted, so the lock stays. Look at .deploy.lock under O11Y_REMOTE_DIR on the host, and remove it with rmdir once no run is active" >&9
     elif ! quiet remote "rmdir $dir/.deploy.lock"; then
@@ -624,10 +645,9 @@ rollback() {
   quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
   if [[ $pointer == previous ]]; then
-    [[ -z $current || $current == "$id" ]] || quiet remote "$(previous_cmd "$current")" ||
-      die "$task: release $id is running, but the previous pointer could not be moved; both pointers are unchanged"
-    quiet remote "$(current_cmd "$id")" ||
-      die "$task: release $id is running, but the current pointer could not be moved; previous now names release $current"
+    swap_pending="$id $current"
+    quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id is running, but the pointer swap failed"
+    swap_pending=
     ok "$task: release $id is running, passed the health gate and is current again; previous names release ${current:-none}"
     return
   fi
