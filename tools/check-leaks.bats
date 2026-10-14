@@ -1242,10 +1242,14 @@ fake() {
 @test "an unreadable private-literals file fails the scan instead of passing it" {
   real=$(command -v awk)
   fake awk "[ -n \"\$NEEDLES\" ] && rm -f \"\$NEEDLES\"; exec $real \"\$@\""
-  echo "zebra-host-01" >leak.md
-  run_check leak.md
+  echo "connect 10.21.32.43" >zebra-host-01.txt
+  run_check zebra-host-01.txt
   [ "$status" -eq 2 ]
   [[ $output == *"incomplete"* ]]
+  # Nothing from the partial scan may reach the output: no finding, no name.
+  [[ $output != *"pattern:"* ]]
+  [[ $output != *"zebra-host-01"* ]]
+  [[ $output != *"10.21.32.43"* ]]
 }
 
 @test "an unreadable path list fails an object scan instead of passing it" {

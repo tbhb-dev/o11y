@@ -234,6 +234,9 @@ scan() {
       quiet = 0
       return hits ? opaque(full) : full
     }
+    # With the private values unread, say nothing: any finding or location
+    # would come from an incomplete set, and the END rule reports the failure.
+    unreadable { next }
     /^\001/ { full = substr($0, 2); label = locate(full); skip = (full ~ exempt); next }
     /^\002/ {
       full = substr($0, 2)
@@ -353,8 +356,9 @@ emit_staged() {
 # rev-list gives an object only the first path it meets, so the paths come
 # from the trees instead: every entry of every listed commit's tree, with
 # gitlinks listed but not entered. Each path is scanned as text of its own,
-# and an object is pattern-scanned unless every path that uses it is
-# exempt. Every object is then read through one cat-file --batch and
+# and an object in the scanned set is pattern-scanned unless every path
+# that uses it is exempt. An object the destination already has is out of
+# scope, by design. Every object is then read through one cat-file --batch and
 # scanned in full; a tree is read too, because the names inside it are
 # what shows a file renamed without any change to its content.
 emit_objects() {
