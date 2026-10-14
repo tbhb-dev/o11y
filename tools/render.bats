@@ -80,7 +80,8 @@ mode() {
 
 @test "port and owner overrides reach the env file only when set" {
   bash "$src/tools/render.sh" "$out/a"
-  ! grep -q '^O11Y_GRAFANA_PORT=' "$out/a/release/.env"
+  run grep -q '^O11Y_GRAFANA_PORT=' "$out/a/release/.env"
+  [ "$status" -eq 1 ]
   O11Y_GRAFANA_PORT=13000 O11Y_SECRETS_OWNER=1000:1000 bash "$src/tools/render.sh" "$out/b"
   grep -qx 'O11Y_GRAFANA_PORT=13000' "$out/b/release/.env"
   grep -qx 'O11Y_SECRETS_OWNER=1000:1000' "$out/b/release/.env"
