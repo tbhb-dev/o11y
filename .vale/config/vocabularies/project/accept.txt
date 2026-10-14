@@ -15,3 +15,5 @@ prek
 rebase
 tailnet
 vendir
+Tailscale
+loopback

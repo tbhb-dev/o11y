@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository. This file is the canon
 
 This repository holds configuration for a self-hosted observability stack built from Grafana, Loki, Tempo, Mimir and Grafana Alloy, run with Docker Compose. It contains YAML and Alloy configuration, shell scripts, mise tasks that deploy over SSH, and Markdown docs. It has no Go or Python app code. The one Python file, `tools/apm_audit.py`, belongs to the toolchain.
 
-One Compose project runs the stack, with RustFS as the S3 object store for Loki, Tempo, and Mimir. To check it, run `mise run validate`, `mise run rustfs-probe` and `mise run smoke`, each of which needs a Docker engine. Deploy tasks are still to come.
+One Compose project runs the stack, with RustFS as the S3 object store for Loki, Tempo, and Mimir. To check it, run `mise run validate`, `mise run rustfs-probe` and `mise run smoke`, each of which needs a Docker engine.
 
 ## Public repository
 
@@ -41,6 +41,16 @@ The init one-shot generates the S3 key and the Grafana recovery password on the 
 Compose prints the contents of every environment file a model loads. Against the environment file of a deployment, run `config` only with `-q`. To read a resolved model, run `mise run compose-config` instead. It renders with placeholders and loads a dummy file, and it ignores inherited variables. In a task, run `docker inspect` on the stack's containers only with a `-f` template that can't print `Config.Env`. Their environment contains the S3 key.
 
 Published ports bind to 127.0.0.1. Don't add a setting that changes that, because Grafana gives anonymous users the Editor role and whatever fronts the host decides who reaches it.
+
+## Stack tasks
+
+The local tasks need only a Docker engine and set every `O11Y_*` value themselves: `render`, `validate`, `compose-config`, `rustfs-probe` and `smoke`. Run them freely. `deploy-plan` also runs locally and is safe to run, but it reads the real values and prints them. Keep its output in the terminal.
+
+The other tasks act on the deploy host over SSH, each as `bash tools/nas.sh <task>`: `preflight`, `stage`, `gate-test`, `gate-clean`, `deploy`, `rollback`, `status`, `logs`, `down`, `serve-apply`, `serve-status`, `serve-clear` and `grafana-password`. `smoke-remote` doesn't use SSH, but it writes test signals to the deployed stack through the Tailscale Services. Run any of these only when the owner has approved that run. This holds for the read-only ones as well, because each of them connects to the host. The tasks that change state also refuse to start unless `O11Y_CONFIRM` names the task. Set it on the command line of that one run, and never export it or put it in a file.
+
+`tools/nas.bats` covers these tasks against a fake host, with `ssh`, `sudo` and the host's binaries stubbed. Change `tools/nas.sh` through that suite, never by trying a task against the real host. `mise run nas-local-rehearsal` goes further and runs the tasks end to end against the local Docker engine, with `ssh`, `sudo` and `tailscale` stubbed, plus a `git` stub that prints the commit for the copied tree. It uses the project names `o11y` and `o11y-gate`, so it refuses to start while either exists on the engine.
+
+What a host task prints can hold deployment paths and names. Never paste its output, a log under `tmp/deploy/`, or `deploy-plan` output into a commit, a pull request, or a comment. Write a short summary by hand instead.
 
 ## Tools
 

@@ -237,6 +237,16 @@ run = "bats tools/check-leaks.bats"
 description = "Test the release renderer, the S3 probe, validation's isolation, and the shared test helpers"
 run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe.bats tools/validate.bats"
 
+[tasks.test-nas]
+description = "Test the deploy host tasks against a fake host, with ssh, sudo and the host's binaries stubbed"
+run = "bats tools/nas.bats"
+
+# Local only: it runs the tasks in a container on the engine's socket and
+# downloads the Compose binary, so CI does not run it.
+[tasks.nas-local-rehearsal]
+description = "Run the deploy host tasks end to end against the local Docker engine, with ssh, sudo and tailscale stubbed"
+run = "bash tools/nas-rehearsal.sh"
+
 [tasks.test]
 description = "Run every test suite"
 run = [
@@ -244,6 +254,7 @@ run = [
   "mise run test-tools",
   "mise run test-leaks",
   "mise run test-stack",
+  "mise run test-nas",
 ]
 
 [tasks.check]
@@ -279,3 +290,67 @@ run = "bash tools/rustfs-probe.sh"
 [tasks.smoke]
 description = "Boot the stack from clean and prove it stores and returns telemetry"
 run = "bash tools/smoke.sh"
+
+# The tasks below act on the deploy host over SSH, on the real O11Y_* values
+# from mise.local.toml. deploy-plan is the exception: it makes no SSH call.
+# The state-changing ones refuse to run unless O11Y_CONFIRM names the task,
+# set on the command line of that one run.
+[tasks.deploy-plan]
+description = "Print what a deploy would do: images, ports, the release env file and the remote commands. No SSH"
+run = "bash tools/nas.sh deploy-plan"
+
+[tasks.preflight]
+description = "Read facts off the deploy host: SSH, sudo, versions, listeners, free space, containers. Changes nothing"
+run = "bash tools/nas.sh preflight"
+
+[tasks.stage]
+description = "Render a release, upload and verify it, and pull its images. Starts nothing. Needs O11Y_CONFIRM=stage"
+run = "bash tools/nas.sh stage"
+
+[tasks.gate-test]
+description = "Rehearse a first deploy in the disposable o11y-gate project, then stop it. Needs O11Y_CONFIRM=gate-test"
+run = "bash tools/nas.sh gate-test"
+
+[tasks.gate-clean]
+description = "Remove the gate rehearsal's directory, and nothing else. Needs O11Y_CONFIRM=gate-clean"
+run = "bash tools/nas.sh gate-clean"
+
+[tasks.deploy]
+description = "Start the staged release under the deploy lock and promote it once the health gate passes. Needs O11Y_CONFIRM=deploy"
+run = "bash tools/nas.sh deploy"
+
+[tasks.rollback]
+description = "Start the current release again, or the one before it with --previous, then run the health gate. Needs O11Y_CONFIRM=rollback"
+run = "bash tools/nas.sh rollback"
+
+[tasks.status]
+description = "Show the current release, each service's state and readiness, container statistics and serve status"
+run = "bash tools/nas.sh status"
+
+[tasks.logs]
+description = "Show the last 200 log lines of the stack, or of one service"
+run = "bash tools/nas.sh logs"
+
+[tasks.down]
+description = "Remove the stack's containers; data, secrets, config and images stay. Needs O11Y_CONFIRM=down"
+run = "bash tools/nas.sh down"
+
+[tasks.serve-apply]
+description = "Map the two Tailscale Services to the stack's loopback ports, without sudo. Needs O11Y_CONFIRM=serve-apply"
+run = "bash tools/nas.sh serve-apply"
+
+[tasks.serve-status]
+description = "Show the deploy host's serve configuration"
+run = "bash tools/nas.sh serve-status"
+
+[tasks.serve-clear]
+description = "Drain and clear the two Tailscale Services; never resets the rest. Needs O11Y_CONFIRM=serve-clear"
+run = "bash tools/nas.sh serve-clear"
+
+[tasks.smoke-remote]
+description = "Prove receipt of one trace, log and metric through both Tailscale Services; --grpc adds a trace over gRPC"
+run = "bash tools/nas.sh smoke-remote"
+
+[tasks.grafana-password]
+description = "Print the Grafana recovery password from the running container. Recovery only"
+run = "bash tools/nas.sh grafana-password"

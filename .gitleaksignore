@@ -1,5 +1,0 @@
-# The first commit of pull request 3 passed Grafana's default login to curl
-# as an argument, in the check that the default password does not work. It
-# is not a secret, and the next commit changed the form. This entry covers
-# that pre-squash commit only: remove it once pull request 3 has merged.
-f17517391c5f0b70ddb32719114650d3869291a6:tools/smoke.sh:curl-auth-user:242
