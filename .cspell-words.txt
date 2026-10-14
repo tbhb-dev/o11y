@@ -38,6 +38,7 @@ pyproject
 rumdl
 rustfs
 rustfsadmin
+sharder
 shellcheck
 shfmt
 spanmetrics
@@ -48,6 +49,7 @@ tmpl
 tombi
 tonumber
 toplevel
+traceid
 urandom
 vendir
 venv

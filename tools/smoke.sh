@@ -285,29 +285,29 @@ has_objects() {
 poll 120 has_objects loki || die "6: the loki bucket is empty after a flush"
 poll 120 has_objects mimir-blocks || die "6: the mimir-blocks bucket is empty after a flush"
 # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
-# Objects in its bucket are not enough: emptying the local data before the
-# block with this trace is uploaded loses the trace. Tempo answers a lookup
-# limited to stored blocks only once that block is in the bucket.
-trace_in_blocks() {
-  curl -s -m 15 "$grafana/api/datasources/proxy/uid/tempo/api/traces/$(cut -d' ' -f2 "$out/receipt")?mode=blocks" |
-    jq -e '.batches | length > 0' >/dev/null 2>&1
-}
 poll 240 has_objects tempo || die "6: the tempo bucket is still empty"
-poll 300 trace_in_blocks || die "6: the trace never reached a stored Tempo block"
-for service in loki tempo; do
-  main rm -sf "$service" >/dev/null 2>&1 || die "6: $service could not be removed"
-  util "rm -rf /d/$service/* /d/$service/.[!.]*"
-  main up -d "$service" >"$out/up.log" 2>&1 || die "6: $service could not be created again"
+# Loki ships its index on a graceful stop, so with its local data emptied it
+# can answer only from the bucket.
+main rm -sf loki >/dev/null 2>&1 || die "6: loki could not be removed"
+util "rm -rf /d/loki/* /d/loki/.[!.]*"
+main up -d loki >"$out/up.log" 2>&1 || die "6: loki could not be created again"
+wait_ready loki
+tools/receipt.sh --recheck "$out/receipt" >/dev/null || die "6: loki lost the receipt once its local data was emptied"
+# Tempo and Mimir are only shown to keep the receipt across a restart, with
+# their local data in place. Mimir answers a query this fresh from its
+# ingester alone: the store is consulted only for samples older than 12
+# hours. Tempo cannot be made to wait for the upload of this trace's block
+# through its public API: a lookup with mode=blocks reaches the query
+# frontend, and at v3.1.0 modules/frontend/traceid_sharder.go
+# (buildShardedRequests, from line 157) overwrites mode on every sub-request,
+# with an ingester job first and then mode=blocks for each block shard. So an
+# emptied local directory could lose a trace whose block was still local.
+for service in tempo mimir; do
+  main restart "$service" >/dev/null 2>&1 || die "6: $service did not restart"
   wait_ready "$service"
-  tools/receipt.sh --recheck "$out/receipt" >/dev/null || die "6: $service lost the receipt once its local data was emptied"
+  tools/receipt.sh --recheck "$out/receipt" >/dev/null || die "6: the receipt is gone after restarting $service"
 done
-# Mimir answers a query this fresh from its ingester alone: the store is
-# consulted only for samples older than 12 hours. So its block is shown to be
-# in the bucket above, and here only that a restart keeps the sample.
-main restart mimir >/dev/null 2>&1 || die "6: mimir did not restart"
-wait_ready mimir
-tools/receipt.sh --recheck "$out/receipt" >/dev/null || die "6: the receipt is gone after restarting mimir"
-ok "6: the three buckets hold objects, Loki and Tempo return the receipt from the bucket alone, Mimir keeps it across a restart"
+ok "6: the three buckets hold objects, Loki returns the receipt from the bucket alone, Tempo and Mimir keep it across a restart"
 
 # 7. Self-monitoring.
 all_up() {
