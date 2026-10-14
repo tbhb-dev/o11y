@@ -12,7 +12,7 @@ Two more checks need a Docker engine. `mise run validate` loads the Compose mode
 
 ## Deploying
 
-One host runs the stack, reached over SSH. Copy `mise.local.toml.example` to `mise.local.toml`, which git ignores, and set the `O11Y_*` values that the header of `tools/nas.sh` lists. Each task that changes the host refuses to run unless `O11Y_CONFIRM` names it, as in `O11Y_CONFIRM=stage mise run stage`.
+One host runs the stack, reached over SSH. Copy `mise.local.toml.example` to `mise.local.toml`, which git ignores, and set the `O11Y_*` values that the header of `tools/nas.sh` lists. Each task that changes the host refuses to run unless `O11Y_CONFIRM` names it, as in `O11Y_CONFIRM=stage mise run stage`. Those that change the stack or its directory also take a lock on the host, so only one of them runs at a time.
 
 A first deploy runs these tasks in order:
 

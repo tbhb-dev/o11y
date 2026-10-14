@@ -11,8 +11,10 @@
 #
 # A deploy never edits what a running stack uses. `stage` uploads a rendered
 # release beside the others, verifying it before it gets its final name.
-# `deploy` starts it under a lock and moves the `current` pointer only once
-# the health gate has passed, so the last release that passed stays intact.
+# `deploy` starts it and moves the `current` pointer only once the health
+# gate has passed, so the last release that passed stays intact. Every task
+# that changes the host's directory or a project runs under one lock,
+# .deploy.lock in O11Y_REMOTE_DIR, taken before it reads any state there.
 #
 # Rules every remote command follows:
 # - The host only grants root as `sudo -n` on the docker and docker-compose
@@ -165,8 +167,9 @@ util_cmd() {
   echo "$docker run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $1:/d $(image_of init) -c $(q "$2")"
 }
 
+# Exits 1 when the lock is taken, 3 when the directory can't be made.
 lock_cmd() {
-  echo "mkdir $dir/.deploy.lock"
+  echo "mkdir -p $dir || exit 3; mkdir $dir/.deploy.lock"
 }
 
 attempt_cmd() {
@@ -192,22 +195,40 @@ gate_down_cmd() {
 }
 
 lock() {
-  quiet remote "$(lock_cmd)" ||
-    die "$task: the deploy lock exists, so another run is active or one was interrupted. Look at .deploy.lock under O11Y_REMOTE_DIR on the host, and remove it with rmdir once no run is active"
-  locked=1
+  local status=0
+  quiet remote "$(lock_cmd)" || status=$?
+  case $status in
+  0) locked=1 ;;
+  1) die "$task: the lock exists, so another run is active or one was interrupted. Look at .deploy.lock under O11Y_REMOTE_DIR on the host, and remove it with rmdir once no run is active" ;;
+  3) die "$task: O11Y_REMOTE_DIR could not be created on the host" ;;
+  *) die "$task: the host could not be reached to take the lock" ;;
+  esac
 }
 
+# A failed unlock fails the run, even one that otherwise passed.
+# A run ended by a signal keeps the lock: a remote command it started may
+# still be running as root.
+# A signal can arrive while a command's output goes to the task log, so the
+# messages go to the terminal's stderr, saved as descriptor 9 at the start.
 cleanup() {
   local status=$?
   trap - EXIT
   if [[ -n $gate_release ]]; then
     # A failed rehearsal keeps its container logs, then stops like any other.
     [[ $status -eq 0 ]] || quiet remote "$(compose_cmd o11y-gate "$gate_release" .env.validate compose.yaml) logs --no-color --tail=500" || true
+    # Only a failed run gets here: a passing gate-test stops the project
+    # itself and reports it.
     quiet remote "$(gate_down_cmd "$gate_release")" ||
-      echo "FAIL $task: the o11y-gate project could not be stopped" >&2
+      echo "FAIL $task: the o11y-gate project could not be stopped" >&9
   fi
-  [[ $locked -eq 0 ]] || quiet remote "rmdir $dir/.deploy.lock" ||
-    echo "FAIL $task: the deploy lock could not be removed" >&2
+  if [[ $locked -eq 1 ]]; then
+    if ((status >= 128)); then
+      echo "FAIL $task: interrupted, so the lock stays. Look at .deploy.lock under O11Y_REMOTE_DIR on the host, and remove it with rmdir once no run is active" >&9
+    elif ! quiet remote "rmdir $dir/.deploy.lock"; then
+      echo "FAIL $task: the lock could not be removed" >&9
+      [[ $status -ne 0 ]] || status=1
+    fi
+  fi
   exit "$status"
 }
 
@@ -492,7 +513,8 @@ deploy_plan() {
   sed 's/^/  /' "$out/release/.env"
   echo "remote commands, in order, each over SSH to O11Y_SSH_HOST:"
   {
-    echo "# stage"
+    echo "# stage, which deploy runs too when nothing is staged for this commit"
+    lock_cmd
     prepare_cmd "$dir/releases"
     for config in "$out"/config/*/; do
       config=$(basename "$config")
@@ -505,9 +527,10 @@ deploy_plan() {
     verify_cmd "$dir/releases/.incoming-$id"
     echo "mv -T $dir/releases/.incoming-$id $dir/releases/$id"
     pull_cmd "$id"
+    echo "rmdir $dir/.deploy.lock"
     echo "# deploy"
-    verify_cmd "$dir/releases/$id"
     lock_cmd
+    verify_cmd "$dir/releases/$id"
     attempt_cmd "$id"
     echo "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init"
     up_cmd "$id"
@@ -527,7 +550,6 @@ deploy() {
     id=$(<tmp/deploy/staged)
   fi
   current=$(promoted current)
-  lock
   quiet remote "$(attempt_cmd "$id")" || die "$task: the attempt could not be recorded"
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
@@ -552,7 +574,6 @@ rollback() {
   [[ ${1:-} != --previous ]] || pointer=previous
   id=$(promoted "$pointer")
   [[ -n $id ]] || die "$task: there is no $pointer release on the host"
-  lock
   quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
   ok "$task: release $id is running and passed the health gate"
@@ -561,7 +582,6 @@ rollback() {
 down() {
   local id
   id=$(active)
-  lock
   quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env.validate compose.yaml) down" ||
     die "$task: down failed; see $log"
   ok "$task: the containers of release $id are removed. Data, secrets, config and images are untouched"
@@ -692,7 +712,7 @@ telemetrygen /telemetrygen --help
 s3probe /usr/local/bin/aws --version"
 
 gate_test() {
-  local id out release data=$dir/gate/data main tools facts service binary flag rustfs
+  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status
   id=$(new_release_id)
   out=tmp/deploy/gate-$id
   release=$dir/gate/releases/$id
@@ -709,8 +729,15 @@ gate_test() {
   gate_release=$release
   quiet remote "$(gate_down_cmd "$release")" ||
     die "$task: a leftover o11y-gate project could not be stopped"
-  ! remote "test -e $data" ||
-    die "$task: data of an earlier rehearsal exists, and a rehearsal of a first deploy starts from nothing. Run gate-clean first"
+  # Exit 1 means the data exists; anything else, such as SSH's 255, means
+  # the host could not be asked.
+  status=0
+  remote "test ! -e $data" || status=$?
+  case $status in
+  0) ;;
+  1) die "$task: data of an earlier rehearsal exists, and a rehearsal of a first deploy starts from nothing. Run gate-clean first" ;;
+  *) die "$task: the host could not be asked whether gate data exists" ;;
+  esac
 
   facts=$(remote "uname -r; df -PT $dir | awk 'NR == 2 { print \$2 }'" | tr '\n' ' ') || facts=unknown
   echo "note $task: kernel and filesystem under O11Y_REMOTE_DIR: $facts"
@@ -779,13 +806,22 @@ gate_test() {
     die "$task: the containers could not be stopped and started"
   health_gate o11y-gate || die "$task: the stack did not recover from a restart without up"
   ok "$task: the stack recovers from a stop and start of every container and passes the receipt check again"
-  ok "$task: the rehearsal passed; the o11y-gate project is now stopped. Its data stays until gate-clean"
+  quiet remote "$(gate_down_cmd "$release")" || die "$task: the rehearsal passed, but the o11y-gate project could not be stopped"
+  gate_release=
+  ok "$task: the rehearsal passed and the o11y-gate project is stopped. Its data stays until gate-clean"
 }
 
 gate_clean() {
-  [[ -z $(remote "$docker ps -aq $(of_project o11y-gate)") ]] ||
-    die "$task: an o11y-gate container still exists; nothing was removed"
-  remote "test -d $dir/gate" || die "$task: there is no gate directory on the host; nothing to remove"
+  local existing status=0
+  existing=$(remote "$docker ps -aq $(of_project o11y-gate)") ||
+    die "$task: the host could not be asked for o11y-gate containers; nothing was removed"
+  [[ -z $existing ]] || die "$task: an o11y-gate container still exists; nothing was removed"
+  remote "test -d $dir/gate" || status=$?
+  case $status in
+  0) ;;
+  1) die "$task: there is no gate directory on the host; nothing to remove" ;;
+  *) die "$task: the host could not be asked for the gate directory; nothing was removed" ;;
+  esac
   load_model
   quiet remote "$(util_cmd "$dir/gate" 'find /d -mindepth 1 -maxdepth 1 -exec rm -rf {} +')" ||
     die "$task: the gate directory could not be emptied; see $log"
@@ -836,8 +872,16 @@ if [[ $task != smoke-remote && $task != serve-status && $task != grafana-passwor
   log=tmp/deploy/$task.log
   : >"$log"
 fi
+exec 9>&2
 trap cleanup EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+# Everything that changes the host's directory or a project holds the lock,
+# and takes it before reading any state there.
+case $task in
+stage | gate-test | gate-clean | deploy | rollback | down) lock ;;
+esac
 
 case $task in
 preflight) preflight ;;

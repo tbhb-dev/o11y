@@ -19,11 +19,31 @@ setup() {
 
   # Runs the remote command locally. STUB_CORRUPT names an upload to damage
   # after it arrives, the way a broken transfer would. STUB_SSH_DOWN makes
-  # every connection fail.
+  # every connection fail, and STUB_SSH_FAIL_ON (a glob) the matching ones.
+  # STUB_ON_LOCK runs before each attempt at the lock, STUB_ON_VERIFY once
+  # before the first manifest check, as another run would in between.
+  # STUB_SIGNAL_ON (a glob) sends the task SIGTERM, as an operator might.
   stub "$dir/bin/ssh" <<'STUB'
 for command; do :; done
 [ -z "${STUB_SSH_DOWN:-}" ] || exit 255
+if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
+  # shellcheck disable=SC2254 # the variable is a pattern
+  case $command in $STUB_SSH_FAIL_ON) exit 255 ;; esac
+fi
+case $command in
+*"mkdir $O11Y_REMOTE_DIR/.deploy.lock"*) [ -z "${STUB_ON_LOCK:-}" ] || sh -c "$STUB_ON_LOCK" ;;
+*"sha256sum -c"*)
+  if [ -n "${STUB_ON_VERIFY:-}" ] && [ ! -e "$STUB/verify.hooked" ]; then
+    : >"$STUB/verify.hooked"
+    sh -c "$STUB_ON_VERIFY"
+  fi
+  ;;
+esac
 printf '%s\n' "$command" >>"$STUB/ssh.log"
+if [ -n "${STUB_SIGNAL_ON:-}" ]; then
+  # shellcheck disable=SC2254
+  case $command in $STUB_SIGNAL_ON) kill -TERM "$PPID" ;; esac
+fi
 sh -c "$command"
 status=$?
 if [ -n "${STUB_CORRUPT:-}" ]; then
@@ -111,6 +131,13 @@ STUB
   stub "$host/bin/docker-compose" <<'STUB'
 all="$*"
 case $all in *"${STUB_FAIL:-no failure}"*) exit 1 ;; esac
+# STUB_FAIL_SECOND fails the second call that matches it.
+case $all in
+*"${STUB_FAIL_SECOND:-no failure}"*)
+  echo x >>"$STUB/fail-second.count"
+  [ "$(wc -l <"$STUB/fail-second.count")" -ne 2 ] || exit 1
+  ;;
+esac
 case $all in
 *" config"*) case $all in *" -q"*) ;; *) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;; esac ;;
 *"version --short"*) echo v2.20.1-stub ;;
@@ -420,7 +447,7 @@ everything() {
   go deploy
   [ "$status" -eq 0 ]
   ! recorded "tar -xpf" || false
-  in_order "cd $remote/releases/$id && sha256sum -c MANIFEST.sha256" "mkdir $remote/.deploy.lock"
+  in_order "mkdir $remote/.deploy.lock" "cd $remote/releases/$id && sha256sum -c MANIFEST.sha256" "rmdir $remote/.deploy.lock"
   [ "$(readlink "$remote/current")" = "releases/$id" ]
 }
 
@@ -487,7 +514,7 @@ everything() {
   rm "$dir/ssh.log"
   go deploy
   [ "$status" -ne 0 ]
-  [[ $output == *"the deploy lock exists"* ]]
+  [[ $output == *"the lock exists"* ]]
   ! recorded " init" || false
   ! recorded " up " || false
   ! recorded rmdir || false
@@ -522,7 +549,8 @@ everything() {
   go rollback
   [ "$status" -ne 0 ]
   ! recorded " up " || false
-  ! recorded "mkdir" || false
+  ! recorded " up " || false
+  recorded "rmdir $remote/.deploy.lock"
 }
 
 @test "down uses current when it exists" {
@@ -554,7 +582,7 @@ everything() {
   go deploy
   STUB_SSH_DOWN=1 go down
   [ "$status" -ne 0 ]
-  [[ $output == *"could not be asked for current"* ]]
+  [[ $output == *"could not be reached to take the lock"* ]]
   [[ $output != *attempt* ]]
 }
 
@@ -646,7 +674,7 @@ everything() {
   go gate-clean
   [ "$status" -ne 0 ]
   ! recorded " run " || false
-  [ -z "$(removals)" ]
+  [ "$(removals)" = "rmdir $remote/.deploy.lock" ]
   [ -d "$remote/gate/data" ]
 }
 
@@ -657,7 +685,7 @@ everything() {
   [ "$status" -eq 0 ]
   recorded "run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $remote/gate:/d "
   [ "$(grep -c -e '-v ' "$dir/ssh.log")" -eq 1 ]
-  [ "$(removals | wc -l)" -eq 2 ]
+  [ "$(removals | grep -vc "^rmdir $remote/.deploy.lock$")" -eq 2 ]
   recorded "rmdir $remote/gate"
   [ ! -e "$remote/gate" ]
   [ -d "$remote/data" ]
@@ -914,4 +942,115 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   everything
   ! grep -n '^FAIL' "$dir/output" || false
   [ "$(grep -c '^ok ' "$dir/output")" -ge 15 ]
+}
+
+# --- review round 1 -------------------------------------------------------
+
+# two_deploys: two promoted releases, ids in $first and $second.
+two_deploys() {
+  healthy o11y
+  go deploy
+  first=$(staged)
+  rm "$repo/tmp/deploy/staged"
+  sleep 1
+  go deploy
+  second=$(staged)
+  rm "$dir/ssh.log"
+}
+
+@test "deploy reads current only once it holds the lock" {
+  two_deploys
+  # Another run promotes a third release just before this one gets the lock.
+  STUB_ON_LOCK="cd $remote && ln -sfn releases/20200101T000000Z-abc1234 current" go stage
+  rm "$dir/ssh.log"
+  STUB_ON_LOCK="cd $remote && ln -sfn releases/20200101T000000Z-abc1234 current" go deploy
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$remote/previous")" = "releases/20200101T000000Z-abc1234" ]
+}
+
+@test "rollback and down choose their release only once they hold the lock" {
+  two_deploys
+  mkdir -p "$remote/releases/20200101T000000Z-abc1234"
+  STUB_ON_LOCK="cd $remote && ln -sfn releases/20200101T000000Z-abc1234 current" go rollback
+  recorded "-f $remote/releases/20200101T000000Z-abc1234/compose.yaml up -d"
+  ! recorded "releases/$second/compose.yaml" || false
+  ln -sfn "releases/$second" "$remote/current"
+  rm "$dir/ssh.log"
+  STUB_ON_LOCK="cd $remote && ln -sfn releases/20200101T000000Z-abc1234 current" go down
+  [ "$status" -eq 0 ]
+  recorded "-f $remote/releases/20200101T000000Z-abc1234/compose.yaml down"
+  ! recorded "releases/$second/compose.yaml" || false
+}
+
+@test "stage, gate-test and gate-clean hold the lock, and change nothing while another run has it" {
+  mkdir -p "$remote/gate/data" "$remote/config/.incoming-alloy-000000000000"
+  mkdir "$remote/.deploy.lock"
+  for task in stage gate-test gate-clean; do
+    rm -f "$dir/ssh.log"
+    go "$task"
+    [ "$status" -ne 0 ]
+    [[ $output == *"the lock exists"* ]]
+    [ "$(cat "$dir/ssh.log")" = "mkdir -p $remote || exit 3; mkdir $remote/.deploy.lock" ]
+  done
+  [ -d "$remote/config/.incoming-alloy-000000000000" ]
+  [ -d "$remote/gate/data" ]
+  [ -d "$remote/.deploy.lock" ]
+}
+
+@test "a second stage that starts while one is uploading fails on the lock and disturbs nothing" {
+  STUB_ON_VERIFY="O11Y_CONFIRM=stage bash $repo/tools/nas.sh stage >$dir/second.out 2>&1; echo \$? >$dir/second.status" go stage
+  [ "$status" -eq 0 ]
+  [ "$(cat "$dir/second.status")" -ne 0 ]
+  grep -q "the lock exists" "$dir/second.out"
+  # Every final directory is a verified copy.
+  for final in "$remote"/config/*/ "$remote/releases/$(staged)/"; do
+    (cd "$final" && sha256sum -c MANIFEST.sha256 >/dev/null)
+  done
+  [ "$(find "$remote" -name '.incoming-*' | wc -l)" -eq 0 ]
+}
+
+@test "gate-clean stops when the container query fails and removes nothing" {
+  mkdir -p "$remote/gate/data/loki"
+  healthy o11y-gate
+  STUB_FAIL="ps -aq" go gate-clean
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be asked for o11y-gate containers"* ]]
+  ! recorded " run " || false
+  [ -d "$remote/gate/data/loki" ]
+}
+
+@test "gate-test stops when the host can't say whether gate data exists" {
+  healthy o11y-gate
+  layout
+  STUB_SSH_FAIL_ON="test*-e $remote/gate/data" go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be asked whether gate data exists"* ]]
+  ! recorded " run " || false
+  ! recorded " up -d" || false
+}
+
+@test "gate-test fails, and says nothing of a stopped project, when its final down fails" {
+  healthy o11y-gate
+  layout
+  STUB_FAIL_SECOND="down --remove-orphans" go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output != *"project is stopped"* ]]
+  [[ $output == *"could not be stopped"* ]]
+}
+
+@test "a run that otherwise passed fails when the lock can't be removed" {
+  healthy o11y
+  go deploy
+  STUB_SSH_FAIL_ON="rmdir $remote/.deploy.lock" go down
+  [ "$status" -ne 0 ]
+  [[ $output == *"the lock could not be removed"* ]]
+}
+
+@test "a run ended by a signal keeps the lock" {
+  healthy o11y
+  STUB_SIGNAL_ON="*up -d --remove-orphans" go deploy
+  [ "$status" -eq 143 ]
+  [ -d "$remote/.deploy.lock" ]
+  ! recorded "rmdir $remote/.deploy.lock" || false
+  [[ $output == *"interrupted, so the lock stays"* ]]
 }
