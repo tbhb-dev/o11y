@@ -2,7 +2,7 @@
 # The leak check against throwaway repositories. Every sample is built at
 # run time from made-up values, so no real private value appears in this
 # file, and the real O11Y_* environment is cleared before each case.
-# cspell:ignore compgen gpgsign btrfs servicesx nothex repointed
+# cspell:ignore compgen gpgsign btrfs servicesx nothex repointed gitlink cacheinfo
 
 setup() {
   checker="$BATS_TEST_DIRNAME/check-leaks.sh"
@@ -937,7 +937,10 @@ push_blocked() {
   run git push "$@"
   [ "$status" -ne 0 ]
   # Only the check's own lines are ours; git prints ref names itself.
-  ! grep -E 'check-leaks|private literal|pattern:' <<<"$output" | grep -qF -e zebra-host-01 -e kestrel99
+  # A negated command that isn't the last line asserts nothing in bats.
+  if grep -E 'check-leaks|private literal|pattern:' <<<"$output" | grep -qF -e zebra-host-01 -e kestrel99; then
+    return 1
+  fi
 }
 
 @test "a clean push passes through the wrapper to prek's hook" {
@@ -1153,4 +1156,115 @@ push_blocked() {
   git commit -q -m "chore: leak"
   push_blocked origin linked
   [[ $output == *"private literal O11Y_SSH_HOST"* ]]
+}
+
+# --- round four: exemptions per path, failures that read as success ----------
+
+@test "a blob reused under an exempt path and a plain one is pattern-scanned" {
+  mkdir -p .agents
+  echo "connect 10.21.32.43" >.agents/example.txt
+  cp .agents/example.txt deployment.txt
+  git add -A
+  git commit -q -m "chore: reuse"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 1 ]
+  [[ $output == *"deployment.txt:1: pattern: private IPv4 address"* ]]
+}
+
+@test "a blob used only under exempt paths stays exempt from patterns" {
+  mkdir -p .agents .devtools
+  echo "connect 10.21.32.43" >.agents/example.txt
+  cp .agents/example.txt .devtools/example.txt
+  git add -A
+  git commit -q -m "chore: exempt only"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 0 ]
+}
+
+@test "a reused blob is caught through the installed hook as well" {
+  hook_repo
+  mkdir -p .agents
+  git switch -q -c work
+  echo "connect 10.21.32.43" >.agents/example.txt
+  cp .agents/example.txt deployment.txt
+  git add -A
+  git commit -q -m "chore: reuse"
+  push_blocked origin work
+  [[ $output == *"pattern: private IPv4 address"* ]]
+}
+
+@test "a gitlink path is scanned though git doesn't list it" {
+  git update-index --add --cacheinfo "160000,$base,var/services"
+  git commit -q -m "chore: gitlink"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 1 ]
+  [[ $output =~ path#[0-9a-f]{8}:path:\ pattern:\ NAS\ path ]]
+}
+
+@test "content that looks like a cat-file answer is only content" {
+  printf 'something missing\n' >plain.txt
+  git add plain.txt
+  git commit -q -m "chore: odd text"
+  run_check --range "$base..HEAD"
+  [ "$status" -eq 0 ]
+}
+
+@test "--pre-push-hook with no ref lines has nothing to push, and --pre-push scans HEAD" {
+  leaky_history
+  run_check --pre-push-hook origin "$work/origin.git" </dev/null
+  [ "$status" -eq 0 ]
+  run_check --pre-push </dev/null
+  [ "$status" -eq 1 ]
+}
+
+# fake NAME BODY: put a stand-in for a command first on PATH.
+fake() {
+  mkdir -p "$BATS_TEST_TMPDIR/shim"
+  printf '#!/bin/sh\n%s\n' "$2" >"$BATS_TEST_TMPDIR/shim/$1"
+  chmod +x "$BATS_TEST_TMPDIR/shim/$1"
+  PATH="$BATS_TEST_TMPDIR/shim:$PATH"
+}
+
+@test "the wrapper blocks a push when buffering git's input fails" {
+  hook_repo
+  git switch -q -c work
+  echo "host zebra-host-01" >l.md
+  git add l.md
+  git commit -q -m "chore: leak"
+  # A cat that eats its input and reports failure, so nothing reaches the check.
+  real_cat=$(command -v cat)
+  fake cat "$real_cat >/dev/null; exit 1"
+  push_blocked origin work
+  [[ $output == *"could not read the push from git"* ]]
+  [ -z "$(git ls-remote "$work/A.git" refs/heads/work)" ]
+}
+
+@test "an unreadable private-literals file fails the scan instead of passing it" {
+  real=$(command -v awk)
+  fake awk "[ -n \"\$NEEDLES\" ] && rm -f \"\$NEEDLES\"; exec $real \"\$@\""
+  echo "zebra-host-01" >leak.md
+  run_check leak.md
+  [ "$status" -eq 2 ]
+  [[ $output == *"incomplete"* ]]
+}
+
+@test "an unreadable path list fails an object scan instead of passing it" {
+  real=$(command -v awk)
+  fake awk "[ -n \"\$PAIRS\" ] && rm -f \"\$PAIRS\"; exec $real \"\$@\""
+  echo ok >c.md
+  git add c.md
+  git commit -q -m "chore: c"
+  run_check --range "$base..HEAD"
+  [ "$status" -ne 0 ]
+}
+
+@test "the installer won't overwrite an unrelated pre-push.prek" {
+  hook_repo
+  hooks=$(git rev-parse --git-path hooks)
+  prek install -t pre-push >/dev/null 2>&1
+  mv "$hooks/pre-push.legacy" "$BATS_TEST_TMPDIR/legacy" 2>/dev/null || true
+  printf 'unrelated\n' >"$hooks/pre-push.prek"
+  run bash tools/install-pre-push.sh
+  [ "$status" -eq 1 ]
+  [ "$(cat "$hooks/pre-push.prek")" = unrelated ]
 }

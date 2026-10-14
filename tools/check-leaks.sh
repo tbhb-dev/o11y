@@ -41,6 +41,10 @@
 #                                  lacks. REMOTE is ignored. With no lines
 #                                  on stdin it scans everything reachable
 #                                  from HEAD, so it reports old history.
+#   check-leaks.sh --pre-push-hook [REMOTE [URL]]
+#                                  the same for the installed hook, where
+#                                  no lines means nothing to push, never
+#                                  a scan of HEAD
 #   check-leaks.sh FILE...         scan exactly those files
 #
 # Range and push scans read whole objects through git cat-file, never a
@@ -164,12 +168,15 @@ scan() {
   PATTERN_EXEMPT=$pattern_exempt NEEDLES=$needles awk '
     BEGIN {
       nf = ENVIRON["NEEDLES"]
-      while ((getline l < nf) > 0) {
+      while ((r = (getline l < nf)) > 0) {
         t = index(l, "\t")
         nn++
         name[nn] = substr(l, 1, t - 1)
         needle[nn] = tolower(substr(l, t + 1))
       }
+      # -1 is a read error, not the end of the file: without the literals the
+      # scan would pass everything.
+      if (r < 0) unreadable = 1
       close(nf)
       exempt = ENVIRON["PATTERN_EXEMPT"]
       for (i = 1; i < 256; i++) ord[sprintf("%c", i)] = i
@@ -241,7 +248,11 @@ scan() {
       lineno = substr($0, 1, t - 1)
       check(tolower(substr($0, t + 1)), skip)
     }
-    END { if (findings) printf "check-leaks: %d finding(s); values are not printed\n", findings > "/dev/stderr"; exit findings ? 1 : 0 }
+    END {
+      if (unreadable) { print "check-leaks: could not read the private values; the result is incomplete" > "/dev/stderr"; exit 2 }
+      if (findings) printf "check-leaks: %d finding(s); values are not printed\n", findings > "/dev/stderr"
+      exit findings ? 1 : 0
+    }
   '
 }
 
@@ -337,49 +348,73 @@ emit_staged() {
 }
 
 # emit_objects: the object ids in $tmp/objs, one "oid[ path]" per line as
-# rev-list --objects prints them, scanned whole. Every path is scanned as
-# text of its own. Every object is read through one cat-file --batch and
-# scanned in full. A tree is read as well, because the names inside it are
+# rev-list --objects prints them, scanned whole.
+#
+# rev-list gives an object only the first path it meets, so the paths come
+# from the trees instead: every entry of every listed commit's tree, with
+# gitlinks listed but not entered. Each path is scanned as text of its own,
+# and an object is pattern-scanned unless every path that uses it is
+# exempt. Every object is then read through one cat-file --batch and
+# scanned in full; a tree is read too, because the names inside it are
 # what shows a file renamed without any change to its content.
 emit_objects() {
+  local c
   awk '!seen[$1]++' "$tmp/objs" >"$tmp/uniq"
-  # Paths, escaped for the record stream.
-  awk 'index($0, " ") { p = substr($0, index($0, " ") + 1); gsub(/\\/, "\\\\", p); print "\002" p }' "$tmp/uniq"
   awk '{ print $1 }' "$tmp/uniq" | git cat-file --batch-check='%(objectname) %(objecttype)' >"$tmp/types"
   # Anything but a tree, blob, commit or tag (a "missing" answer included)
   # is an object the scan could not account for.
   if awk '$2 != "blob" && $2 != "tree" && $2 != "commit" && $2 != "tag" { bad = 1 } END { exit !bad }' "$tmp/types"; then
     return 1
   fi
+  awk '$2 == "commit" { print $1 }' "$tmp/types" >"$tmp/commits"
+  while read -r c; do
+    git -c core.quotepath=off ls-tree -r -t --full-tree "$c"
+  done <"$tmp/commits" |
+    awk '{ t = index($0, "\t"); split(substr($0, 1, t - 1), f, " "); print f[3] " " substr($0, t + 1) }' |
+    awk '!seen[$0]++' >"$tmp/pairs"
+  # Paths, escaped for the record stream: those from the trees, then any
+  # rev-list found for an object no commit's tree holds (a tagged blob).
+  cat "$tmp/pairs" "$tmp/uniq" |
+    awk 'index($0, " ") { p = substr($0, index($0, " ") + 1); gsub(/\\/, "\\\\", p); if (!(p in seen)) { seen[p] = 1; print "\002" p } }'
   awk '{ print $1 }' "$tmp/types" >"$tmp/toread"
   git cat-file --batch <"$tmp/toread" >"$tmp/batch"
-  # A header line is "<oid> <type> <size>". Contents can't forge one into a
-  # pass: every line is scanned whichever object it is credited to, and a
-  # count that comes out wrong fails the scan.
-  tr '\0' '\n' <"$tmp/batch" | PATHS=$tmp/uniq TYPES=$tmp/types awk '
-    BEGIN {
-      while ((getline l < ENVIRON["PATHS"]) > 0) {
+  # A header line is "<oid> <type> <size>". Object bodies are scanned as
+  # text and never interpreted as protocol: a missing object was already
+  # refused by the type check above, and one that vanishes since leaves a
+  # header unseen, which the count catches. A body can't forge a pass,
+  # since every line is scanned whichever object it is credited to.
+  tr '\0' '\n' <"$tmp/batch" | PAIRS=$tmp/pairs NAMES=$tmp/uniq TYPES=$tmp/types PATTERN_EXEMPT=$pattern_exempt awk '
+    function load(file, kind,    r, l, sp, p, o) {
+      while ((r = (getline l < file)) > 0) {
+        if (kind == "types") { split(l, f, " "); want[f[1]] = f[2]; nwant++; continue }
         sp = index(l, " ")
-        if (sp) { p = substr(l, sp + 1); gsub(/\\/, "\\\\", p); path[substr(l, 1, sp - 1)] = p }
+        if (!sp) continue
+        o = substr(l, 1, sp - 1)
+        p = substr(l, sp + 1)
+        # Prefer a path that is not exempt, so patterns run if any use is.
+        if (!(o in chosen) || (chosen[o] ~ exempt && p !~ exempt)) chosen[o] = p
       }
-      while ((getline l < ENVIRON["TYPES"]) > 0) {
-        split(l, f, " ")
-        want[f[1]] = f[2]; nwant++
-      }
+      if (r < 0) bad = 1
+      close(file)
+    }
+    BEGIN {
+      exempt = ENVIRON["PATTERN_EXEMPT"]
+      load(ENVIRON["TYPES"], "types")
+      load(ENVIRON["PAIRS"], "paths")
+      load(ENVIRON["NAMES"], "paths")
     }
     (NF == 3 && $1 in want && !($1 in got) && $2 == want[$1] && $3 ~ /^[0-9]+$/) {
       oid = $1
       got[oid] = 1
       ngot++
       n = 0
-      if (($2 == "blob" || $2 == "tree") && path[oid] != "") label = path[oid]
+      if (($2 == "blob" || $2 == "tree") && chosen[oid] != "") { label = chosen[oid]; gsub(/\\/, "\\\\", label) }
       else label = $2 " " substr(oid, 1, 7)
       printf "\001%s\n", label
       next
     }
-    $2 == "missing" && NF == 2 { missing = 1 }
     { n++; print n "\t" $0 }
-    END { if (missing || ngot != nwant) exit 3 }
+    END { if (bad || ngot != nwant) exit 3 }
   '
 }
 
@@ -412,7 +447,7 @@ emit_range() {
 # refs are a cache of some other moment and play no part. If the question
 # fails the scan fails, since the push would too. The URL is never printed.
 emit_pre_push() {
-  local url=${1-} lref loid rref roid extra count=0 ask='' oid
+  local url=${1-} hook=${2-} lref loid rref roid extra count=0 ask='' oid
   local re='^([0-9a-f]{40}|[0-9a-f]{64})$'
   require_complete
   : >"$tmp/objs"
@@ -436,6 +471,9 @@ emit_pre_push() {
     done
   fi
   if ((count == 0)); then
+    # A hook run with no ref lines has nothing to push. A manual run has no
+    # lines either, and scans everything reachable from HEAD.
+    if [[ -n $hook ]]; then return 0; fi
     add_objects HEAD
   else
     if [[ -n $ask && -n $url ]]; then
@@ -461,6 +499,7 @@ emit_pre_push() {
 mode=tree
 range=
 push_url=
+hook=
 files=()
 while (($#)); do
   case $1 in
@@ -471,8 +510,9 @@ while (($#)); do
     mode=range
     range=$1
     ;;
-  --pre-push)
+  --pre-push | --pre-push-hook)
     mode=pre-push
+    if [[ $1 == --pre-push-hook ]]; then hook=1; fi
     # git gives the hook the remote's name, then the URL it pushes to.
     if (($# > 1)) && [[ $2 != -* ]]; then shift; fi
     if (($# > 1)) && [[ $2 != -* ]]; then
@@ -497,7 +537,7 @@ case $mode in
 tree) emit_tree >"$tmp/stream" ;;
 staged) emit_staged >"$tmp/stream" ;;
 range) emit_range "$range" >"$tmp/stream" ;;
-pre-push) emit_pre_push "$push_url" >"$tmp/stream" ;;
+pre-push) emit_pre_push "$push_url" "$hook" >"$tmp/stream" ;;
 files)
   for f in "${files[@]}"; do
     [[ -f $f ]] || die "an argument is not a readable file"

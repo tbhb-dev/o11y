@@ -33,9 +33,13 @@ wrapper() {
 hooks=$(cd "$(dirname "$0")" && pwd)
 input=$(mktemp) || exit 1
 trap 'rm -f "$input"' EXIT
-cat >"$input"
+# A failed copy would leave an empty file, which reads as nothing to push.
+if ! cat >"$input"; then
+  echo "check-leaks: could not read the push from git; the push is blocked" >&2
+  exit 1
+fi
 if [ -f tools/check-leaks.sh ]; then
-  mise run lint-leaks -- --pre-push "$@" <"$input" || exit 1
+  mise run lint-leaks -- --pre-push-hook "$@" <"$input" || exit 1
 else
   echo "check-leaks: the leak check is not present on this branch and was skipped" >&2
 fi
@@ -60,6 +64,11 @@ if [[ ${1-} == --check ]]; then
 fi
 
 if is_prek "$hooks/pre-push"; then
+  # Replace an earlier copy of prek's hook, never anything else.
+  if [[ -e $hooks/pre-push.prek ]] && ! is_prek "$hooks/pre-push.prek"; then
+    echo "install-pre-push: pre-push.prek exists and isn't a prek hook; move it aside first" >&2
+    exit 1
+  fi
   mv "$hooks/pre-push" "$hooks/pre-push.prek"
   # prek install parks a hook it didn't write as pre-push.legacy. If that
   # was this wrapper, the prek hook is now in front of it again.
