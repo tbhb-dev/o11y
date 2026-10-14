@@ -11,7 +11,9 @@
 # probe in its own Compose project and removes everything afterwards. With
 # --release it probes that rendered release through the given Compose
 # command and leaves the project and its data in place; only the probe
-# bucket is removed.
+# bucket is removed. In that mode Compose reads the S3 env file the release
+# names, so run it where that file is readable: on the host that holds the
+# data directory, or with O11Y_S3_ENV_FILE pointing at a readable copy.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -64,6 +66,17 @@ init() {
   COMPOSE_IGNORE_ORPHANS=1 dc -f "$release/compose.init.yaml" run --rm -T init >/dev/null
 }
 
+# Whatever way the script ends, stop the background writer of step 5 and
+# remove the scratch directory. A local run also removes its project.
+writer=
+scratch=$(mktemp -d)
+finish() {
+  [[ -z $writer ]] || kill "$writer" 2>/dev/null || true
+  rm -rf "$scratch"
+  [[ $(type -t cleanup) != function ]] || cleanup
+}
+trap finish EXIT
+
 if [[ -z $release ]]; then
   pin_docker_api
   isolate_environment
@@ -87,7 +100,6 @@ if [[ -z $release ]]; then
   # A run that was killed can leave its project and data behind.
   dc -f "$release/compose.init.yaml" down -v --remove-orphans >/dev/null 2>&1 || true
   remove_test_data "$image"
-  trap cleanup EXIT
   init || die "init failed"
   publish_s3_env "$image" "$out/s3.env"
 else
@@ -120,7 +132,7 @@ ok "3: a request signed with the default login is refused"
 s3probe objects || die "4: object round trips failed"
 ok "4: 1 KiB, 10 MiB and multipart 100 MiB round trips match, 1,100 keys list across pages, delete empties the bucket"
 
-crash_log=$(mktemp)
+crash_log=$scratch/crash.log
 s3probe crash >"$crash_log" 2>&1 &
 writer=$!
 poll 120 grep -q 'probe: writing' "$crash_log" || die "5: the writer never started"
@@ -131,8 +143,8 @@ if ! wait "$writer"; then
   cat "$crash_log" >&2
   die "5: an acknowledged write was lost or a listed key is unreadable after a kill"
 fi
+writer=
 ok "5: $(grep -o '[0-9]* acknowledged writes survived' "$crash_log") a kill and restart, and every listed key is readable"
-rm -f "$crash_log"
 
 s3probe cleanup || die "6: the probe bucket could not be removed"
 ok "6: probe bucket removed"

@@ -23,6 +23,7 @@ isolate_environment
 
 out=$root/tmp/validate
 rm -rf "$out"
+trap 'rm -rf "$out"' EXIT
 export O11Y_DATA_DIR=$out/data O11Y_GRAFANA_ROOT_URL=https://grafana.example.ts.net/
 tools/render.sh "$out"
 
@@ -39,7 +40,6 @@ if [[ ${1:-} == --model ]]; then
   for file in compose.yaml compose.init.yaml compose.tools.yaml; do
     compose --profile tools -f "$release/$file" config --format json
   done
-  rm -rf "$out"
   exit 0
 fi
 
@@ -132,5 +132,4 @@ else
   failed=1
 fi
 
-rm -rf "$out"
 exit "$failed"

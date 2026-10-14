@@ -55,8 +55,10 @@ init() {
 }
 
 # Runs a script as root in a utility container with the data directory at /d.
+# These scripts handle the secret files, so the container keeps no log.
 util() {
-  docker run --rm --user 0:0 --network none --entrypoint /bin/sh -v "$O11Y_DATA_DIR:/d" "$util_image" -c "$1"
+  docker run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/sh \
+    -v "$O11Y_DATA_DIR:/d" "$util_image" -c "$1"
 }
 
 cleanup() {
@@ -242,8 +244,12 @@ ok "3: all six services are ready, and the four with a healthcheck report health
 # The password reaches curl on stdin, as a real one would have to.
 [[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - "$grafana/api/admin/settings") == 200 ]] ||
   die "4: the admin password from the file does not work"
-[[ $(printf 'user = "admin:%s"\n' admin | grafana_status -K - "$grafana/api/admin/settings") != 200 ]] ||
-  die "4: the default admin password works"
+# With anonymous access on, Grafana treats a failed login as an anonymous
+# request, and the admin API forbids the anonymous Editor: 403, where the
+# generated password above got 200. The request has to complete and say
+# exactly that, or an outage would pass for a refusal.
+printf 'user = "admin:%s"\n' admin | expect_status 403 -K - "$grafana/api/admin/settings" ||
+  die "4: the default admin password was not refused"
 [[ $(curl -s -m 15 "$grafana/api/datasources" | jq -c '[.[].uid] | sort') == '["loki","mimir","tempo"]' ]] ||
   die "4: the provisioned datasources are not the expected three"
 [[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
@@ -279,7 +285,15 @@ has_objects() {
 poll 120 has_objects loki || die "6: the loki bucket is empty after a flush"
 poll 120 has_objects mimir-blocks || die "6: the mimir-blocks bucket is empty after a flush"
 # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
+# Objects in its bucket are not enough: emptying the local data before the
+# block with this trace is uploaded loses the trace. Tempo answers a lookup
+# limited to stored blocks only once that block is in the bucket.
+trace_in_blocks() {
+  curl -s -m 15 "$grafana/api/datasources/proxy/uid/tempo/api/traces/$(cut -d' ' -f2 "$out/receipt")?mode=blocks" |
+    jq -e '.batches | length > 0' >/dev/null 2>&1
+}
 poll 240 has_objects tempo || die "6: the tempo bucket is still empty"
+poll 300 trace_in_blocks || die "6: the trace never reached a stored Tempo block"
 for service in loki tempo; do
   main rm -sf "$service" >/dev/null 2>&1 || die "6: $service could not be removed"
   util "rm -rf /d/$service/* /d/$service/.[!.]*"
@@ -346,7 +360,9 @@ done
 receipt "$out/receipt-restarted" >/dev/null || die "9: receipt failed after a restart without up"
 ok "9: the stack recovers from a Compose restart and from a stop and start of every container, and passes the receipt again"
 
-# 10. Sentinel search.
+# 10. Sentinel search. The process arguments are a snapshot of what is
+# running now: a command that took a key as an argument and has since exited
+# is not in it, so this is not evidence about the whole run.
 # Self-test of the search itself: O11Y_SMOKE_LEAK=log, args or rendered
 # leaks the secret key sentinel into one searched place, and the run must
 # then fail here and name that place.

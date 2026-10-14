@@ -7,6 +7,7 @@ set -eu
 
 bucket=o11y-probe
 work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 
 fail() {
   echo "probe: $*" >&2

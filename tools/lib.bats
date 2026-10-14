@@ -49,3 +49,69 @@ teardown() {
   run sentinel_absent "-rf" "${places[@]}"
   [ "$status" -eq 0 ]
 }
+
+@test "a place that does not exist fails as unsearchable" {
+  run sentinel_absent "$secret" "${places[@]}" "the printed Compose model=$dir/missing.log"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL the printed Compose model could not be searched" ]
+}
+
+@test "an unreadable place fails as unsearchable" {
+  [ "$(id -u)" -ne 0 ] || skip "root reads any file"
+  chmod 000 "$dir/containers.log"
+  run sentinel_absent "$secret" "${places[@]}"
+  chmod 600 "$dir/containers.log"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL a container log could not be searched" ]
+}
+
+@test "an empty file fails, because nothing was collected" {
+  : >"$dir/processes.log"
+  run sentinel_absent "$secret" "${places[@]}"
+  [ "$status" -eq 1 ]
+  [ "$output" = "FAIL a process argument is empty, so it cannot be searched" ]
+}
+
+# Puts a stub first on PATH. The stub prints $STUB_OUT and exits $STUB_EXIT,
+# and records its arguments.
+stub() {
+  mkdir -p "$dir/bin"
+  printf '#!/bin/sh\necho "$@" >>"%s/%s.args"\nprintf %%s "$STUB_OUT"\nexit "${STUB_EXIT:-0}"\n' "$dir" "$1" >"$dir/bin/$1"
+  chmod +x "$dir/bin/$1"
+  PATH="$dir/bin:$PATH"
+}
+
+@test "expect_status passes on exactly the expected status" {
+  stub curl
+  STUB_OUT=401 run expect_status 401 http://127.0.0.1:1/
+  [ "$status" -eq 0 ]
+}
+
+@test "expect_status fails when the request never completes" {
+  stub curl
+  STUB_OUT=000 STUB_EXIT=7 run expect_status 401 http://127.0.0.1:1/
+  [ "$status" -eq 1 ]
+  [[ $output == *"before any status arrived"* ]]
+}
+
+@test "expect_status fails on a server error" {
+  stub curl
+  STUB_OUT=500 run expect_status 401 http://127.0.0.1:1/
+  [ "$status" -eq 1 ]
+  [[ $output == *"got 500"* ]]
+}
+
+@test "expect_status fails on a success where a refusal is expected" {
+  stub curl
+  STUB_OUT=200 run expect_status 401 http://127.0.0.1:1/
+  [ "$status" -eq 1 ]
+}
+
+@test "the credential copy runs with container logging off" {
+  stub docker
+  stub uname
+  export O11Y_DATA_DIR=/var/lib/o11y-test/x
+  STUB_OUT=Darwin publish_s3_env image "$dir/s3.env"
+  grep -q -- '--log-driver none' "$dir/docker.args"
+  [ "$O11Y_S3_ENV_FILE" = "$dir/s3.env" ]
+}

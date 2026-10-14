@@ -54,12 +54,14 @@ test_data_dir() {
 # publish_s3_env <image> <file>: Compose runs on the host and reads s3.env
 # when it loads the model. With the data directory inside a VM the host
 # cannot see it, so copy it out and point Compose at the copy. Test projects
-# only: a deployment never copies this file anywhere.
+# only: a deployment never copies this file anywhere. The key travels on the
+# container's stdout, which Docker's log driver would record, so logging is
+# off for this container.
 publish_s3_env() {
   host_is_linux && return
   (
     umask 077
-    docker run --rm --user 0:0 --network none --entrypoint /bin/cat \
+    docker run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/cat \
       -v "$O11Y_DATA_DIR/secrets:/s:ro" "$1" /s/s3.env >"$2"
   ) || return 1
   export O11Y_S3_ENV_FILE=$2
@@ -102,16 +104,49 @@ rustfs_log_ok() {
   ! grep -qiE 'rustfsadmin|is not set|default root credentials|ENOSYS|Function not implemented|Unsupported filesystem' <<<"$log"
 }
 
+# expect_status <status> <curl arguments...>: the request must complete and
+# answer with exactly that status. A transport failure or any other status
+# fails, so an outage cannot pass for a refusal.
+expect_status() {
+  local want=$1 got
+  shift
+  got=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@") || {
+    echo "request failed before any status arrived" >&2
+    return 1
+  }
+  [[ $got == "$want" ]] || {
+    echo "expected status $want, got $got" >&2
+    return 1
+  }
+}
+
 # sentinel_absent <sentinel> <name=path>...: fails when a file or directory
-# holds the sentinel, naming each place on stderr and never the value.
+# holds the sentinel, naming each place on stderr and never the value. A
+# place that is missing, empty or unreadable also fails: a search that could
+# not look is not a clean result.
 sentinel_absent() {
-  local sentinel=$1 place found=0
+  local sentinel=$1 place path status found=0
   shift
   for place in "$@"; do
-    if grep -rqF -- "$sentinel" "${place#*=}"; then
+    path=${place#*=}
+    if [[ -f $path && ! -s $path ]]; then
+      echo "FAIL ${place%%=*} is empty, so it cannot be searched" >&2
+      found=1
+      continue
+    fi
+    status=0
+    grep -rqF -- "$sentinel" "$path" 2>/dev/null || status=$?
+    case $status in
+    0)
       echo "FAIL a sentinel secret is in ${place%%=*}" >&2
       found=1
-    fi
+      ;;
+    1) ;;
+    *)
+      echo "FAIL ${place%%=*} could not be searched" >&2
+      found=1
+      ;;
+    esac
   done
   return "$found"
 }
