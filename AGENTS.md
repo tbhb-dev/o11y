@@ -20,7 +20,7 @@ Check the staged diff against that list before every commit.
 
 The init one-shot generates the S3 key and the Grafana recovery password on the host that runs the stack. Keep both out of committed files, rendered files, command lines, logs, and task output.
 
-Compose prints the contents of every environment file a model loads. Against the environment file of a deployment, run `config` only with `-q`. To read a resolved model, run `mise run compose-config` instead. It renders with placeholders and loads a dummy file, and it ignores inherited variables. Never run `docker inspect` on the stack's containers in a task. Their environment contains the S3 key.
+Compose prints the contents of every environment file a model loads. Against the environment file of a deployment, run `config` only with `-q`. To read a resolved model, run `mise run compose-config` instead. It renders with placeholders and loads a dummy file, and it ignores inherited variables. In a task, run `docker inspect` on the stack's containers only with a `-f` template that can't print `Config.Env`. Their environment contains the S3 key.
 
 Published ports bind to 127.0.0.1. Don't add a setting that changes that, because Grafana gives anonymous users the Editor role and whatever fronts the host decides who reaches it.
 
