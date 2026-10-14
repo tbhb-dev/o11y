@@ -542,7 +542,6 @@ everything() {
   [ "$status" -eq 0 ]
   recorded "-f $remote/releases/$first/compose.yaml up -d"
   ! recorded "releases/$second/" || false
-  ! recorded "mv -T" || false
 }
 
 @test "rollback fails when the pointer it needs does not exist" {
@@ -956,6 +955,41 @@ two_deploys() {
   go deploy
   second=$(staged)
   rm "$dir/ssh.log"
+}
+
+@test "rollback takes no argument but --previous, and refuses before any ssh call" {
+  for args in previous --prev "--previous extra" 20260101T000000Z-abc1234; do
+    # shellcheck disable=SC2086 # each case is a list of words
+    O11Y_CONFIRM=rollback nas rollback $args
+    [ "$status" -ne 0 ]
+    [[ $output == *"the only argument it takes is --previous"* ]]
+  done
+  [ ! -e "$dir/ssh.log" ]
+}
+
+@test "rollback --previous swaps the pointers once the restored release passes the health gate" {
+  two_deploys
+  go rollback --previous
+  [ "$status" -eq 0 ]
+  in_order "-f $remote/releases/$first/compose.yaml up -d" "exec -i o11y-rustfs-1 curl" \
+    "ln -sfn releases/$second previous.new && mv -T previous.new previous" \
+    "ln -sfn releases/$first current.new && mv -T current.new current"
+  [ "$(readlink "$remote/current")" = "releases/$first" ]
+  [ "$(readlink "$remote/previous")" = "releases/$second" ]
+  # The next deploy keeps the restored release as previous.
+  rm "$repo/tmp/deploy/staged"
+  sleep 1
+  go deploy
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$remote/previous")" = "releases/$first" ]
+}
+
+@test "rollback --previous that fails the health gate leaves both pointers alone" {
+  two_deploys
+  STUB_RECEIPT_FAIL=1 go rollback --previous
+  [ "$status" -ne 0 ]
+  [ "$(readlink "$remote/current")" = "releases/$second" ]
+  [ "$(readlink "$remote/previous")" = "releases/$first" ]
 }
 
 @test "deploy reads current only once it holds the lock" {

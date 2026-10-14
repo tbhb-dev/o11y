@@ -27,7 +27,7 @@ A first deploy runs these tasks in order:
 
 ### After the first deploy
 
-For day-to-day work, `status` shows the current release and each service's state, and `logs` shows recent container logs. To go back, `rollback` starts the current release again, or the one before it with `--previous`. Finally, `down` removes the containers and leaves everything else in place.
+For day-to-day work, `status` shows the current release and each service's state, and `logs` shows recent container logs. To go back, `rollback` starts the current release again, or the one before it with `--previous`. Once `--previous` passes the health gate, the two pointers swap: `current` names the restored release and `previous` the one rolled back from. The next deploy then keeps the restored release as its fallback. Finally, `down` removes the containers and leaves everything else in place.
 
 Everything the stack keeps on the host is under `$O11Y_REMOTE_DIR`. Each deploy adds a directory under `releases/`, and `current` and `previous` point at the last two releases that passed the health gate. Telemetry goes to `data/`. The init step creates the S3 key and the Grafana recovery password on the host, under `data/secrets/`. No task copies them off the host, and only `grafana-password` prints the recovery password, for recovery.
 

@@ -569,13 +569,26 @@ deploy() {
   exit 1
 }
 
+# rollback [--previous]: starts current again, or previous. Once previous
+# passes the health gate the two pointers swap, so current names what runs
+# and a later deploy keeps the release rolled back from as previous rather
+# than the last one that passed.
 rollback() {
-  local pointer=current id
+  local pointer=current id current=
   [[ ${1:-} != --previous ]] || pointer=previous
   id=$(promoted "$pointer")
   [[ -n $id ]] || die "$task: there is no $pointer release on the host"
+  [[ $pointer == current ]] || current=$(promoted current)
   quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
+  if [[ $pointer == previous ]]; then
+    [[ -z $current || $current == "$id" ]] || quiet remote "$(previous_cmd "$current")" ||
+      die "$task: release $id is running, but the previous pointer could not be moved; both pointers are unchanged"
+    quiet remote "$(current_cmd "$id")" ||
+      die "$task: release $id is running, but the current pointer could not be moved; previous now names release $current"
+    ok "$task: release $id is running, passed the health gate and is current again; previous names release ${current:-none}"
+    return
+  fi
   ok "$task: release $id is running and passed the health gate"
 }
 
@@ -847,7 +860,11 @@ remote-compose)
   remote_stdin "sudo -n $O11Y_REMOTE_COMPOSE $(q "$@")"
   exit
   ;;
-stage | gate-test | gate-clean | deploy | rollback | down | serve-apply | serve-clear) confirm ;;
+rollback)
+  [[ $# -eq 0 || ($# -eq 1 && $1 == --previous) ]] || die "$task: the only argument it takes is --previous"
+  confirm
+  ;;
+stage | gate-test | gate-clean | deploy | down | serve-apply | serve-clear) confirm ;;
 preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-password) ;;
 *)
   echo "usage: nas.sh <task> [arguments]; the tasks are listed at the top of this file" >&2
