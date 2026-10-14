@@ -108,7 +108,12 @@ ps)
   esac
   case $all in
   *--format*) awk -v p="$project" '$1 == p { sub(/^[^ ]+ /, ""); print }' "$STUB/containers" ;;
-  *) awk -v p="$project" -v s="$service" '$1 == p && (s == "" || $2 == s) { print $3 }' "$STUB/containers" ;;
+  *)
+    # Without -a only running containers count.
+    case " $* " in *" -a"*) running= ;; *) running=1 ;; esac
+    awk -v p="$project" -v s="$service" -v r="$running" \
+      '$1 == p && (s == "" || $2 == s) && (r == "" || $5 == "Up") { print $3 }' "$STUB/containers"
+    ;;
   esac
   ;;
 exec)
@@ -1107,6 +1112,14 @@ two_deploys() {
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
   [[ $output == *"interrupted, so the lock stays"* ]]
+}
+
+@test "status measures no container when none of the stack's is running" {
+  echo "o11y s3-buckets o11y-s3-buckets-1 files Exited (0) 1 minute ago" >"$dir/containers"
+  nas status
+  [ "$status" -eq 0 ]
+  [[ $output != *"stats of every container on the host"* ]]
+  [[ $output == *"no running containers to measure"* ]]
 }
 
 @test "remote output reaches the terminal without the deployment's names, paths or tailnet addresses" {

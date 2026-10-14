@@ -660,7 +660,9 @@ status() {
         echo "$service not ready"
       fi
     done
-    remote "ids=\$($docker ps -q $(of_project o11y)) && $docker stats --no-stream --format $(q 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}') \$ids" ||
+    # With no running container, a bare `docker stats` would list every
+    # other container on the host.
+    remote "ids=\$($docker ps -q $(of_project o11y)) || exit 1; if [ -n \"\$ids\" ]; then $docker stats --no-stream --format $(q 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}') \$ids; else echo 'no running containers to measure'; fi" ||
       echo "container statistics are unavailable"
   fi
   shown "$tailscale serve status" || echo "serve status is unavailable"
