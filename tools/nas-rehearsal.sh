@@ -187,7 +187,21 @@ step "down failed" down
 [[ -d $remote/data/secrets && -L $remote/current ]] || die "rehearsal: down removed more than the containers"
 ok "rehearsal: down removed the containers and kept data, secrets and releases"
 
+# A probe that fails early leaves a stopped one-off s3probe container, which
+# Compose's plain `down` keeps. Plant one in the gate project and show that,
+# so gate-test's own teardown has to remove it.
+one_offs() {
+  docker ps -aq --filter label=com.docker.compose.project=o11y-gate --filter label=com.docker.compose.oneoff=True
+}
+planted=$remote/$first
+"$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" -f "$planted/compose.tools.yaml" \
+  run -T --entrypoint /bin/true s3probe >/dev/null 2>&1 || die "rehearsal: the one-off s3probe container could not be planted"
+"$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" down >/dev/null 2>&1
+[[ -n $(one_offs) ]] || die "rehearsal: a plain down removed the one-off container, so the planted leftover proves nothing"
+ok "rehearsal: a plain down keeps a stopped one-off s3probe container in o11y-gate"
+
 step "gate-test failed" gate-test
+[[ -z $(one_offs) ]] || die "rehearsal: gate-test left a one-off container behind"
 [[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y-gate) ]] || die "rehearsal: gate-test left containers"
 step "gate-clean failed" gate-clean
 [[ ! -e $remote/gate && -d $remote/data ]] || die "rehearsal: gate-clean removed the wrong thing"

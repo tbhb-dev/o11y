@@ -183,6 +183,14 @@ current_cmd() {
   echo "cd $dir && ln -sfn releases/$1 current.new && mv -T current.new current"
 }
 
+# gate_down_cmd <gate release dir>: stops the o11y-gate project. Compose
+# 2.20.1's `down` leaves one-off `run` containers, such as an s3probe that a
+# failed probe left behind, unless it removes orphans. That is safe here
+# because it names the disposable project with compose.yaml alone.
+gate_down_cmd() {
+  echo "$(compose_cmd o11y-gate "$1" .env.validate compose.yaml) down --remove-orphans"
+}
+
 lock() {
   quiet remote "$(lock_cmd)" ||
     die "$task: the deploy lock exists, so another run is active or one was interrupted. Look at .deploy.lock under O11Y_REMOTE_DIR on the host, and remove it with rmdir once no run is active"
@@ -195,7 +203,7 @@ cleanup() {
   if [[ -n $gate_release ]]; then
     # A failed rehearsal keeps its container logs, then stops like any other.
     [[ $status -eq 0 ]] || quiet remote "$(compose_cmd o11y-gate "$gate_release" .env.validate compose.yaml) logs --no-color --tail=500" || true
-    quiet remote "$(compose_cmd o11y-gate "$gate_release" .env.validate compose.yaml) down" ||
+    quiet remote "$(gate_down_cmd "$gate_release")" ||
       echo "FAIL $task: the o11y-gate project could not be stopped" >&2
   fi
   [[ $locked -eq 0 ]] || quiet remote "rmdir $dir/.deploy.lock" ||
@@ -699,7 +707,7 @@ gate_test() {
   # From here on the project is stopped on the way out, pass or fail. The
   # first stop clears what a killed run left behind.
   gate_release=$release
-  quiet remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) down" ||
+  quiet remote "$(gate_down_cmd "$release")" ||
     die "$task: a leftover o11y-gate project could not be stopped"
   ! remote "test -e $data" ||
     die "$task: data of an earlier rehearsal exists, and a rehearsal of a first deploy starts from nothing. Run gate-clean first"

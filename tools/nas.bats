@@ -579,8 +579,12 @@ everything() {
   grep -qx "O11Y_OTLP_HTTP_PORT=14318" "$release/.env"
   # Only the gate project, and its last Compose command is down.
   ! grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | grep -qv -e ' -p o11y-gate ' || false
-  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" down" ]]
-  ! recorded "remove-orphans" || false
+  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" -f $release/compose.yaml down --remove-orphans" ]]
+  # Orphans are removed only by the gate project's down, which also takes
+  # the one-off containers a failed probe can leave; first a leftover run's,
+  # then this run's.
+  [ "$(grep -c 'remove-orphans' "$dir/ssh.log")" -eq 2 ]
+  [ "$(grep -c " -p o11y-gate --env-file $release/.env.validate -f $release/compose.yaml down --remove-orphans$" "$dir/ssh.log")" -eq 2 ]
   # Each image's own binary, with no shell.
   for binary in "/usr/bin/loki grafana/loki:" "/tempo grafana/tempo:" "/bin/mimir grafana/mimir:" \
     "/bin/alloy grafana/alloy:" "grafana grafana/grafana:" "rustfs rustfs/rustfs:" \
@@ -606,7 +610,7 @@ everything() {
   STUB_PROBE_FAIL=1 go gate-test
   [ "$status" -ne 0 ]
   [[ $output == *"RustFS refused to start on the filesystem"* ]]
-  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" down" ]]
+  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" down --remove-orphans" ]]
 }
 
 @test "gate-test reports any other probe failure as a probe failure" {
@@ -884,6 +888,14 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   [ "$(grep -c grafana_admin_password "$dir/ssh.log")" -eq 1 ]
   # Locally, `config` only ever loads the dummy env file.
   ! grep ' config' "$dir/compose.log" | grep -qv -e '--env-file [^ ]*/\.env\.validate ' || false
+}
+
+@test "orphans are removed only by a production up or the gate project's down, each on compose.yaml alone" {
+  everything
+  orphans=$(grep -e '--remove-orphans' "$dir/ssh.log")
+  [ -n "$(grep -E ' -p o11y-gate .* down --remove-orphans$' <<<"$orphans")" ]
+  ! grep -vE -e ' -p o11y --env-file [^ ]*/\.env -f [^ ]*/compose\.yaml up -d --remove-orphans$' \
+    -e ' -p o11y-gate --env-file [^ ]*/\.env\.validate -f [^ ]*/compose\.yaml down --remove-orphans$' <<<"$orphans" || false
 }
 
 @test "no task removes anything under releases, config or data" {

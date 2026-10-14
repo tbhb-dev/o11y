@@ -36,6 +36,7 @@ memberlist
 mktemp
 multitenancy
 objstore
+oneoff
 otel
 pipefail
 preapproval
