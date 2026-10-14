@@ -67,11 +67,18 @@ init() {
 }
 
 # Whatever way the script ends, stop the background writer of step 5 and
-# remove the scratch directory. A local run also removes its project.
+# remove the scratch directory. A local run also removes its project. The
+# writer is a Compose client running a probe container: killing the client
+# leaves the container, so Compose kills that too, and only then is the
+# background job reaped.
 writer=
 scratch=$(mktemp -d)
 finish() {
-  [[ -z $writer ]] || kill "$writer" 2>/dev/null || true
+  if [[ -n $writer ]]; then
+    kill "$writer" 2>/dev/null || true
+    tools kill s3probe >/dev/null 2>&1 || true
+    wait "$writer" 2>/dev/null || true
+  fi
   rm -rf "$scratch"
   [[ $(type -t cleanup) != function ]] || cleanup
 }

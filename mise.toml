@@ -211,7 +211,7 @@ run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
 
 [tasks.test-stack]
 description = "Test the release renderer, the S3 probe, validation's isolation, and the shared test helpers"
-run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/validate.bats"
+run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe.bats tools/validate.bats"
 
 [tasks.test]
 description = "Run every test suite"
