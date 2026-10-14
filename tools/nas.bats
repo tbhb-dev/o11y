@@ -88,7 +88,6 @@ exec)
   *grafana_admin_password*) echo stub-grafana-password ;;
   *" env"* | *printenv*) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
   *"-X POST"*) printf 204 ;;
-  *mode=blocks*) echo '{"batches":[{}]}' ;;
   *curl*) printf '%s' "${STUB_HTTP:-200}" ;;
   esac
   ;;
@@ -592,8 +591,10 @@ everything() {
   grep -qF "receipt.sh --state-file" "$dir/tools.log"
   grep -qF "receipt.sh --recheck" "$dir/tools.log"
   # Local state is emptied under the gate data directory only.
-  in_order "/api/traces/0123456789abcdef0123456789abcdef?mode=blocks" "rm -sf loki" "-v $remote/gate/data/loki:/d" "up -d loki" "rm -sf tempo" "-v $remote/gate/data/tempo:/d" "up -d tempo" \
-    "restart mimir" "stop \$ids && " " down"
+  in_order "rm -sf loki" "-v $remote/gate/data/loki:/d" "up -d loki" "restart tempo" "restart mimir" "stop \$ids && " " down"
+  # Only Loki's local state is emptied; Tempo's could race its upload.
+  [ "$(grep -c -e '-v .*/gate/data/[a-z]*:/d' "$dir/ssh.log")" -eq 1 ]
+  ! recorded "rm -sf tempo" || false
   [ ! -e "$remote/current" ]
   [ ! -e "$remote/attempt" ]
 }
@@ -864,10 +865,11 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   ! grep -qv -e "^-n $O11Y_REMOTE_DOCKER " -e "^-n $O11Y_REMOTE_COMPOSE " "$dir/sudo.log" || false
   ! grep -F "$O11Y_REMOTE_TAILSCALE" "$dir/sudo.log" || false
   runs=$(grep -F "$O11Y_REMOTE_DOCKER run " "$dir/ssh.log")
-  [ "$(wc -l <<<"$runs")" -ge 12 ]
+  # Eight version checks, the layout listing, Loki's emptying, gate-clean.
+  [ "$(wc -l <<<"$runs")" -eq 11 ]
   ! grep -qv -e '--entrypoint ' <<<"$runs" || false
   ! grep -e '--entrypoint /bin/sh' <<<"$runs" | grep -qv -e '--user 0:0 ' || false
-  [ "$(grep -c -e '--entrypoint /bin/sh' <<<"$runs")" -ge 4 ]
+  [ "$(grep -c -e '--entrypoint /bin/sh' <<<"$runs")" -eq 3 ]
 }
 
 @test "no task reads a generated secret, prints a model or an environment, or lets the S3 key into its output" {

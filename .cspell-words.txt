@@ -23,6 +23,7 @@ cksum
 devtools
 dscacheutil
 esac
+findutils
 forcepathstyle
 getent
 gobin

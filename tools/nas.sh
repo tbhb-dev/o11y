@@ -732,10 +732,15 @@ gate_test() {
     die "$task: owners, modes or sizes under the gate data directory differ from the layout"
   ok "$task: the data directories and the four secret files have the expected owners, modes and sizes"
 
-  # Read back from the object store, as smoke.sh does: a backend whose
-  # container is removed and whose local directory is emptied can only
-  # answer from its bucket. Gate project only; a deployment's local state is
-  # never emptied.
+  # Read back from the object store, as smoke.sh does: Loki, with its
+  # container removed and its local directory emptied, can only answer from
+  # its bucket. Gate project only; a deployment's local state is never
+  # emptied. Tempo and Mimir are shown only to hold objects and to keep the
+  # receipt across a restart: Tempo's query frontend sets the lookup mode
+  # itself on each request it splits off (modules/frontend/traceid_sharder.go
+  # at v3.1.0), so a lookup limited to stored blocks proves nothing and
+  # emptying its local state could race the upload, and
+  # Mimir answers a query this fresh from its ingester.
   rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
@@ -746,28 +751,19 @@ gate_test() {
   [[ $(http_status "$rustfs" -X POST http://mimir:8080/ingester/flush) == 204 ]] || die "$task: Mimir's flush endpoint failed"
   poll 120 has_objects loki || die "$task: the loki bucket is empty after a flush"
   poll 120 has_objects mimir-blocks || die "$task: the mimir-blocks bucket is empty after a flush"
+  # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
   poll 240 has_objects tempo || die "$task: the tempo bucket is still empty"
-  # Objects in Tempo's bucket are not enough: the block with this trace may
-  # still be local. Tempo answers a lookup limited to stored blocks only
-  # once that block is in the bucket.
-  trace_in_blocks() {
-    in_network "$rustfs" -s -m 15 "http://grafana:3000/api/datasources/proxy/uid/tempo/api/traces/$(cut -d' ' -f2 "$out/receipt")?mode=blocks" </dev/null |
-      jq -e '.batches | length > 0' >/dev/null 2>&1
-  }
-  poll 300 trace_in_blocks || die "$task: the receipt's trace never reached a stored Tempo block"
-  for service in loki tempo; do
-    quiet remote "$main rm -sf $service" || die "$task: $service could not be removed"
-    quiet remote "$(util_cmd "$data/$service" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of $service could not be emptied"
-    quiet remote "$main up -d $service" || die "$task: $service could not be created again"
-    all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after $service was recreated"
-    receipt o11y-gate --recheck "$out/receipt" || die "$task: $service lost the receipt once its local state was emptied"
+  quiet remote "$main rm -sf loki" || die "$task: loki could not be removed"
+  quiet remote "$(util_cmd "$data/loki" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of loki could not be emptied"
+  quiet remote "$main up -d loki" || die "$task: loki could not be created again"
+  all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after loki was recreated"
+  receipt o11y-gate --recheck "$out/receipt" || die "$task: loki lost the receipt once its local state was emptied"
+  for service in tempo mimir; do
+    quiet remote "$main restart $service" || die "$task: $service did not restart"
+    all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after $service restarted"
+    receipt o11y-gate --recheck "$out/receipt" || die "$task: the receipt is gone after restarting $service"
   done
-  # Mimir answers a query this fresh from its ingester, so only a restart is
-  # shown here, not a read from the bucket.
-  quiet remote "$main restart mimir" || die "$task: mimir did not restart"
-  all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after mimir restarted"
-  receipt o11y-gate --recheck "$out/receipt" || die "$task: the receipt is gone after restarting mimir"
-  ok "$task: the three buckets hold objects, Loki and Tempo return the receipt from the bucket alone, Mimir keeps it across a restart"
+  ok "$task: the three buckets hold objects, Loki returns the receipt from its bucket alone, Tempo and Mimir keep it across a restart"
 
   # What a daemon or host restart does: everything stopped, then started at
   # once with dependents first, with no `up` to order it.
