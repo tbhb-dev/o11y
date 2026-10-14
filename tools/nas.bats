@@ -90,6 +90,14 @@ project=${all##*label=com.docker.compose.project=}
 project=${project%% *}
 case $1 in
 ps)
+  case $all in
+  *label=com.docker.compose.project=*) ;;
+  *)
+    # The whole host's containers, with private names in them.
+    echo "minio-1 minio $O11Y_REMOTE_DIR/other Up 2 days $O11Y_SSH_HOST"
+    exit 0
+    ;;
+  esac
   [ -f "$STUB/containers" ] || exit 0
   service=
   case $all in
@@ -122,7 +130,11 @@ run)
     ;;
   esac
   ;;
-version) echo "client 24.0.2, server 24.0.2" ;;
+version) echo "client 24.0.2, server 24.0.2 on $O11Y_SSH_HOST" ;;
+stats)
+  # No container named: the real one lists every container on the host.
+  [ "$#" -gt 4 ] || echo "stats of every container on the host"
+  ;;
 esac
 exit 0
 STUB
@@ -149,7 +161,15 @@ STUB
   stub "$host/bin/tailscale" <<'STUB'
 case "$*" in
 version) echo 1.104.1 ;;
-"serve status") echo "No serve config" ;;
+"serve status")
+  if [ -n "${STUB_SERVE_CONFIG:-}" ]; then
+    # What a configured host shows: its names and tailnet addresses.
+    echo "https://grafana.$O11Y_TAILNET_DOMAIN (tailnet only) on $O11Y_SSH_HOST"
+    echo "|-- / proxy http://127.0.0.1:3000 at 100.$((64 + 37)).2.3 and fd7a:115c:a1e""0::1 $O11Y_PRIVATE_STRINGS"
+  else
+    echo "No serve config"
+  fi
+  ;;
 serve*)
   if [ -n "${STUB_SERVE_DENIED:-}" ]; then
     echo "Access denied: serve config denied" >&2
@@ -1087,4 +1107,22 @@ two_deploys() {
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
   [[ $output == *"interrupted, so the lock stays"* ]]
+}
+
+@test "remote output reaches the terminal without the deployment's names, paths or tailnet addresses" {
+  export O11Y_TAILNET_DOMAIN=sentinel-net.example.ts.net O11Y_SSH_HOST=sentinel-host
+  export O11Y_PRIVATE_STRINGS=sentinelModel42 STUB_SERVE_CONFIG=1
+  healthy o11y
+  nas preflight
+  nas status
+  go serve-apply
+  nas serve-status
+  go serve-clear
+  ! grep -n -e sentinel-net -e sentinel-host -e sentinelModel42 -e "$remote" \
+    -e "100\.$((64 + 37))\." -e "fd7a:115c:a1e[0]" "$dir/output" || false
+  # The placeholders show where they were.
+  grep -q 'https://grafana.$O11Y_TAILNET_DOMAIN' "$dir/output"
+  grep -q '<tailnet address>' "$dir/output"
+  # The raw output is kept in the private task logs.
+  grep -q sentinel-net "$repo/tmp/deploy/serve-status.log"
 }

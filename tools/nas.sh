@@ -46,6 +46,10 @@
 #
 # Output is variable names, release ids and pass or fail lines. What the
 # remote commands print goes to tmp/deploy/<task>.log, which is private.
+# Where a task shows remote output, such as versions or the serve
+# configuration, it first replaces the deployment's paths, names and tailnet
+# addresses with placeholders. deploy-plan and grafana-password are the only
+# tasks that print private values.
 # Never add `set -x`: the commands hold deployment paths.
 set -euo pipefail
 umask 077
@@ -230,6 +234,37 @@ cleanup() {
     fi
   fi
   exit "$status"
+}
+
+# redact: the remote output on stdin, fit for the terminal. The deployment's
+# directory, host alias, tailnet domain and private strings become
+# placeholders, and tailnet addresses become <tailnet address>. The raw
+# output stays in the task log.
+redact() {
+  local line entry entries=() private='<private>'
+  # shellcheck disable=SC2016 # the placeholders are the variable names
+  local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST'
+  IFS=, read -r -a entries <<<"${O11Y_PRIVATE_STRINGS:-}"
+  while IFS= read -r line || [[ -n $line ]]; do
+    [[ -z ${O11Y_REMOTE_DIR:-} ]] || line=${line//"$O11Y_REMOTE_DIR"/$dir_name}
+    [[ -z ${O11Y_TAILNET_DOMAIN:-} ]] || line=${line//"$O11Y_TAILNET_DOMAIN"/$domain_name}
+    [[ -z ${O11Y_SSH_HOST:-} ]] || line=${line//"$O11Y_SSH_HOST"/$host_name}
+    for entry in ${entries[@]+"${entries[@]}"}; do
+      [[ ${#entry} -lt 4 ]] || line=${line//"$entry"/$private}
+    done
+    printf '%s\n' "$line"
+  done | sed -E -e 's/(^|[^0-9.])100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])(\.[0-9]{1,3}){2}/\1<tailnet address>/g' \
+    -e 's/fd7a:115c:a1e[0]:[0-9a-fA-F:]*/<tailnet address>/g'
+}
+
+# shown <remote command>: runs it, keeps the raw output in the task log and
+# prints it redacted.
+shown() {
+  local out status=0
+  out=$(remote "$1" 2>&1) || status=$?
+  printf '%s\n' "--- $1" "$out" >>"$log"
+  [[ -z $out ]] || redact <<<"$out"
+  return "$status"
 }
 
 # promoted <pointer>: the release id the pointer names, or nothing.
@@ -472,29 +507,36 @@ up_cmd() {
 
 preflight() {
   local failed=0 version
-  # fact <required|noted> <label> <remote command>
+  # fact <required|noted> <label> <summary> <remote command>: the raw output
+  # goes to the log. The summary is `text` for the redacted output, `lines`
+  # for a count of its lines, or `serve` for whether a configuration exists.
   fact() {
-    local out status=ok
-    out=$(remote "$3" 2>&1) || status=FAIL
+    local out status=ok summary
+    out=$(remote "$4" 2>&1) || status=FAIL
+    printf '%s\n' "--- $2" "$out" >>"$log"
     [[ $status == ok || $1 == required ]] || status=note
-    echo "$status $task: $2"
-    [[ -z $out ]] || echo "    ${out//$'\n'/$'\n'    }"
+    case $3 in
+    text) summary=$(redact <<<"$out" | tr '\n' ' ') ;;
+    lines) summary="$(grep -c . <<<"$out" || true) line(s); listed in $log" ;;
+    serve) if grep -q 'No serve config' <<<"$out"; then summary=none; else summary="configured; shown in $log"; fi ;;
+    esac
+    echo "$status $task: $2${summary:+: ${summary% }}"
     [[ $status != FAIL ]] || failed=1
   }
-  fact required "SSH reaches the host" "uname -sr"
-  fact required "sudo -n runs docker" "$docker version --format $(q 'client {{.Client.Version}}, server {{.Server.Version}}')"
+  fact required "SSH reaches the host" text "uname -sr"
+  fact required "sudo -n runs docker" text "$docker version --format $(q 'client {{.Client.Version}}, server {{.Server.Version}}')"
   version=$("$O11Y_COMPOSE" version --short)
-  fact required "sudo -n runs docker-compose, at the version the local tests pin ($version)" \
+  fact required "sudo -n runs docker-compose, at the version the local tests pin ($version)" text \
     "sudo -n $O11Y_REMOTE_COMPOSE version --short | grep -F $(q "$version")"
-  fact required "tailscale answers without sudo" "$tailscale version | head -n 1"
-  fact noted "serve status" "$tailscale serve status"
-  fact required "sha256sum exists and mv accepts -T, which staging and promotion rely on" \
+  fact required "tailscale answers without sudo" text "$tailscale version | head -n 1"
+  fact noted "serve configuration" serve "$tailscale serve status"
+  fact required "sha256sum exists and mv accepts -T, which staging and promotion rely on" text \
     "sha256sum --version >/dev/null && mv --help 2>&1 | grep -q -- -T"
-  fact noted "listeners on the stack's ports (none before the first deploy)" \
-    "netstat -ltn | grep -E $(q ":($grafana_port|$grpc_port|$http_port) ") || echo none"
-  fact noted "free space where O11Y_REMOTE_DIR will live" \
-    "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Ph \"\$d\""
-  fact noted "existing containers" "$docker ps -a --format $(q '{{.Names}} {{.Image}} {{.Status}}')"
+  fact noted "listeners on the stack's ports (none before the first deploy)" lines \
+    "netstat -ltn | grep -E $(q ":($grafana_port|$grpc_port|$http_port) ") || true"
+  fact noted "kilobytes free where O11Y_REMOTE_DIR will live" text \
+    "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4 }'"
+  fact noted "existing containers" lines "$docker ps -a --format $(q '{{.Names}} {{.Image}} {{.Status}}')"
   [[ $failed -eq 0 ]] || die "$task: a required fact does not hold"
 }
 
@@ -621,7 +663,7 @@ status() {
     remote "ids=\$($docker ps -q $(of_project o11y)) && $docker stats --no-stream --format $(q 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}') \$ids" ||
       echo "container statistics are unavailable"
   fi
-  remote "$tailscale serve status" || echo "serve status is unavailable"
+  shown "$tailscale serve status" || echo "serve status is unavailable"
 }
 
 logs() {
@@ -655,7 +697,7 @@ serve_apply() {
     "svc:otlp --https=4318 http://127.0.0.1:$http_port" "svc:otlp --https=4317 http://127.0.0.1:$grpc_port"; do
     serve "--service=$mapping" || die "$task: tailscale refused a mapping; its message is in $log"
   done
-  remote "$tailscale serve status"
+  shown "$tailscale serve status"
 }
 
 # Drains before clearing so open connections finish, and only ever clears
@@ -669,7 +711,7 @@ serve_clear() {
     serve "clear $service" || failed=1
   done
   [[ $failed -eq 0 ]] || die "$task: a service could not be cleared; see $log"
-  remote "$tailscale serve status"
+  shown "$tailscale serve status"
 }
 
 # resolve <name>: its IPv4 address as this machine resolves it. A container
@@ -752,7 +794,7 @@ gate_test() {
   *) die "$task: the host could not be asked whether gate data exists" ;;
   esac
 
-  facts=$(remote "uname -r; df -PT $dir | awk 'NR == 2 { print \$2 }'" | tr '\n' ' ') || facts=unknown
+  facts=$(remote "uname -r; df -PT $dir | awk 'NR == 2 { print \$2 }'" | redact | tr '\n' ' ') || facts=unknown
   echo "note $task: kernel and filesystem under O11Y_REMOTE_DIR: $facts"
 
   while read -r service binary flag; do
@@ -884,7 +926,7 @@ smoke-remote) need domain ;;
 grafana-password) need host docker ;;
 esac
 
-if [[ $task != smoke-remote && $task != serve-status && $task != grafana-password ]]; then
+if [[ $task != smoke-remote && $task != grafana-password ]]; then
   mkdir -p tmp/deploy
   log=tmp/deploy/$task.log
   : >"$log"
@@ -912,7 +954,7 @@ down) down ;;
 status) status ;;
 logs) logs "$@" ;;
 serve-apply) serve_apply ;;
-serve-status) remote "$tailscale serve status" ;;
+serve-status) shown "$tailscale serve status" ;;
 serve-clear) serve_clear ;;
 smoke-remote) smoke_remote "$@" ;;
 grafana-password) grafana_password ;;
