@@ -48,7 +48,7 @@ The local tasks need only a Docker engine and set every `O11Y_*` value themselve
 
 The other tasks act on the deploy host over SSH, each as `bash tools/nas.sh <task>`: `preflight`, `stage`, `gate-test`, `gate-clean`, `deploy`, `rollback`, `status`, `logs`, `down`, `serve-apply`, `serve-status`, `serve-clear` and `grafana-password`. `smoke-remote` doesn't use SSH, but it writes test signals to the deployed stack through the Tailscale Services. Run any of these only when the owner has approved that run. This holds for the read-only ones as well, because each of them connects to the host. The tasks that change state also refuse to start unless `O11Y_CONFIRM` names the task. Set it on the command line of that one run, and never export it or put it in a file.
 
-`tools/nas.bats` covers these tasks against a fake host, with `ssh`, `sudo` and the host's binaries stubbed. Change `tools/nas.sh` through that suite, never by trying a task against the real host.
+`tools/nas.bats` covers these tasks against a fake host, with `ssh`, `sudo` and the host's binaries stubbed. Change `tools/nas.sh` through that suite, never by trying a task against the real host. `mise run nas-local-rehearsal` goes further and runs the tasks end to end against the local Docker engine, with `ssh`, `sudo` and `tailscale` stubbed, plus a `git` stub that prints the commit for the copied tree. It uses the project names `o11y` and `o11y-gate`, so it refuses to start while either exists on the engine.
 
 What a host task prints can hold deployment paths and names. Never paste its output, a log under `tmp/deploy/`, or `deploy-plan` output into a commit, a pull request, or a comment. Write a short summary by hand instead.
 

@@ -241,6 +241,12 @@ run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe
 description = "Test the deploy host tasks against a fake host, with ssh, sudo and the host's binaries stubbed"
 run = "bats tools/nas.bats"
 
+# Local only: it runs the tasks in a container on the engine's socket and
+# downloads the Compose binary, so CI does not run it.
+[tasks.nas-local-rehearsal]
+description = "Run the deploy host tasks end to end against the local Docker engine, with ssh, sudo and tailscale stubbed"
+run = "bash tools/nas-rehearsal.sh"
+
 [tasks.test]
 description = "Run every test suite"
 run = [
