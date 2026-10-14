@@ -348,7 +348,7 @@ everything() {
   for task in "${changing[@]}"; do
     nas "$task"
     [ "$status" -ne 0 ]
-    [[ $output == *"O11Y_CONFIRM=$task"* ]]
+    [[ $output == *"O11Y_CONFIRM=$task"* ]] || false
   done
   [ ! -e "$dir/ssh.log" ]
 }
@@ -369,7 +369,7 @@ everything() {
   go stage
   [ "$status" -eq 0 ]
   id=$(staged)
-  [[ $output == *"release $id"* ]]
+  [[ $output == *"release $id"* ]] || false
   in_order "mkdir $remote/releases/.incoming-$id && tar -xpf - -C $remote/releases/.incoming-$id" \
     "cd $remote/releases/.incoming-$id && sha256sum -c MANIFEST.sha256" \
     "mv -T $remote/releases/.incoming-$id $remote/releases/$id" \
@@ -405,7 +405,7 @@ everything() {
 @test "a release that fails verification is not renamed and nothing is pulled" {
   STUB_CORRUPT=releases/.incoming- go stage
   [ "$status" -ne 0 ]
-  [[ $output == *"does not match its manifest"* ]]
+  [[ $output == *"does not match its manifest"* ]] || false
   ! grep -q "^mv -T $remote/releases/" "$dir/ssh.log" || false
   ! recorded " pull" || false
   [ ! -e "$repo/tmp/deploy/staged" ]
@@ -433,7 +433,7 @@ everything() {
   rm "$dir/ssh.log"
   go stage
   [ "$status" -ne 0 ]
-  [[ $output == *"$loki is already on the host and no longer matches its manifest"* ]]
+  [[ $output == *"$loki is already on the host and no longer matches its manifest"* ]] || false
   [ -f "$remote/config/$loki/config.yaml" ]
   ! recorded " pull" || false
   ! grep -q '^mv ' "$dir/ssh.log" || false
@@ -516,9 +516,9 @@ everything() {
   [ ! -e "$remote/current" ]
   [ ! -e "$remote/.deploy.lock" ]
   recorded "rmdir $remote/.deploy.lock"
-  [[ $output == *"was not promoted"* ]]
-  [[ $output == *"First-deploy cleanup"*"O11Y_CONFIRM=down mise run down"* ]]
-  [[ $output != *"mise run rollback"* ]]
+  [[ $output == *"was not promoted"* ]] || false
+  [[ $output == *"First-deploy cleanup"*"O11Y_CONFIRM=down mise run down"* ]] || false
+  [[ $output != *"mise run rollback"* ]] || false
 }
 
 @test "a failed receipt after an earlier deploy promotes nothing, unlocks, and names rollback" {
@@ -534,14 +534,14 @@ everything() {
   [ "$(readlink "$remote/current")" = "releases/$first" ]
   [ ! -e "$remote/previous" ]
   [ ! -e "$remote/.deploy.lock" ]
-  [[ $output == *"O11Y_CONFIRM=rollback mise run rollback"* ]]
+  [[ $output == *"O11Y_CONFIRM=rollback mise run rollback"* ]] || false
 }
 
 @test "a service that is up but not ready fails the health gate" {
   healthy o11y
   STUB_HTTP=503 go deploy
   [ "$status" -ne 0 ]
-  [[ $output == *"is not ready"* ]]
+  [[ $output == *"is not ready"* ]] || false
   [ ! -e "$remote/current" ]
   [ ! -e "$dir/tools.log" ]
 }
@@ -553,7 +553,7 @@ everything() {
   rm "$dir/ssh.log"
   go deploy
   [ "$status" -ne 0 ]
-  [[ $output == *"the lock exists"* ]]
+  [[ $output == *"the lock exists"* ]] || false
   ! recorded " init" || false
   ! recorded " up " || false
   ! recorded rmdir || false
@@ -620,8 +620,8 @@ everything() {
   go deploy
   STUB_SSH_DOWN=1 go down
   [ "$status" -ne 0 ]
-  [[ $output == *"could not be reached to take the lock"* ]]
-  [[ $output != *attempt* ]]
+  [[ $output == *"could not be reached to take the lock"* ]] || false
+  [[ $output != *attempt* ]] || false
 }
 
 @test "down fails when there is neither a promoted release nor an attempt" {
@@ -645,7 +645,7 @@ everything() {
   grep -qx "O11Y_OTLP_HTTP_PORT=14318" "$release/.env"
   # Only the gate project, and its last Compose command is down.
   ! grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | grep -qv -e ' -p o11y-gate ' || false
-  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" -f $release/compose.yaml down --remove-orphans" ]]
+  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" -f $release/compose.yaml down --remove-orphans" ]] || false
   # Orphans are removed only by the gate project's down, which also takes
   # the one-off containers a failed probe can leave; first a leftover run's,
   # then this run's.
@@ -675,8 +675,8 @@ everything() {
   echo "[FATAL] Server runtime failed: Unsupported filesystem type detected for RustFS local endpoints: /data (BTRFS)." >"$dir/rustfs.log"
   STUB_PROBE_FAIL=1 go gate-test
   [ "$status" -ne 0 ]
-  [[ $output == *"RustFS refused to start on the filesystem"* ]]
-  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" down --remove-orphans" ]]
+  [[ $output == *"RustFS refused to start on the filesystem"* ]] || false
+  [[ $(grep -F "$O11Y_REMOTE_COMPOSE" "$dir/ssh.log" | tail -n 1) == *" -p o11y-gate "*" down --remove-orphans" ]] || false
 }
 
 @test "gate-test reports any other probe failure as a probe failure" {
@@ -684,15 +684,15 @@ everything() {
   layout
   STUB_PROBE_FAIL=1 go gate-test
   [ "$status" -ne 0 ]
-  [[ $output == *"the RustFS probe failed"* ]]
-  [[ $output != *"refused to start"* ]]
+  [[ $output == *"the RustFS probe failed"* ]] || false
+  [[ $output != *"refused to start"* ]] || false
 }
 
 @test "gate-test refuses to rehearse on the data of an earlier run" {
   mkdir -p "$remote/gate/data"
   go gate-test
   [ "$status" -ne 0 ]
-  [[ $output == *"gate-clean"* ]]
+  [[ $output == *"gate-clean"* ]] || false
   ! recorded " up " || false
   ! recorded " run " || false
 }
@@ -703,7 +703,7 @@ everything() {
   sed -i.bak 's/^secrets 0:0 755$/secrets 0:0 777/' "$dir/layout"
   go gate-test
   [ "$status" -ne 0 ]
-  [[ $output == *"differ from the layout"* ]]
+  [[ $output == *"differ from the layout"* ]] || false
 }
 
 @test "gate-clean refuses while an o11y-gate container exists" {
@@ -747,7 +747,7 @@ $t serve status" ]
 @test "serve-apply that is refused says the owner must set an operator user, and stops" {
   STUB_SERVE_DENIED=1 go serve-apply
   [ "$status" -ne 0 ]
-  [[ $output == *"set an operator user"* ]]
+  [[ $output == *"set an operator user"* ]] || false
   [ "$(wc -l <"$dir/ssh.log")" -eq 1 ]
   [ ! -e "$dir/sudo.log" ]
 }
@@ -766,20 +766,20 @@ $t serve status" ]
   nas deploy-plan
   [ "$status" -eq 0 ]
   [ ! -e "$dir/ssh.log" ]
-  [[ $output == *"release id: "*"-abc1234"* ]]
-  [[ $output == *"rustfs rustfs/rustfs:"*"@sha256:"* ]]
-  [[ $output == *"grafana 127.0.0.1:3000 -> 3000"* ]]
-  [[ $output == *"alloy 127.0.0.1:4317 -> 4317"* ]]
-  [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]]
-  [[ $output == *"compose.init.yaml run --rm -T init"* ]]
-  [[ $output == *"compose.yaml up -d --remove-orphans"* ]]
-  [[ $output == *"mv -T current.new current"* ]]
+  [[ $output == *"release id: "*"-abc1234"* ]] || false
+  [[ $output == *"rustfs rustfs/rustfs:"*"@sha256:"* ]] || false
+  [[ $output == *"grafana 127.0.0.1:3000 -> 3000"* ]] || false
+  [[ $output == *"alloy 127.0.0.1:4317 -> 4317"* ]] || false
+  [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
+  [[ $output == *"compose.init.yaml run --rm -T init"* ]] || false
+  [[ $output == *"compose.yaml up -d --remove-orphans"* ]] || false
+  [[ $output == *"mv -T current.new current"* ]] || false
 }
 
 @test "preflight changes nothing on the host" {
   nas preflight
   [ "$status" -eq 0 ]
-  [[ $output == *"ok preflight: sudo -n runs docker-compose"* ]]
+  [[ $output == *"ok preflight: sudo -n runs docker-compose"* ]] || false
   [ ! -e "$remote" ]
   read_only
 }
@@ -788,7 +788,7 @@ $t serve status" ]
   stub "$host/bin/docker-compose" <<<'echo v2.24.5'
   nas preflight
   [ "$status" -ne 0 ]
-  [[ $output == *"FAIL preflight: sudo -n runs docker-compose"* ]]
+  [[ $output == *"FAIL preflight: sudo -n runs docker-compose"* ]] || false
 }
 
 @test "status reports the current release and readiness without changing anything" {
@@ -798,10 +798,10 @@ $t serve status" ]
   rm "$dir/ssh.log"
   nas status
   [ "$status" -eq 0 ]
-  [[ $output == *"current release: $id"* ]]
-  [[ $output == *"rustfs (release 20260101T000000Z-abc1234) Up 1 minute (healthy)"* ]]
-  [[ $output == *"mimir ready"* ]]
-  [[ $output != *"$remote/releases"* ]]
+  [[ $output == *"current release: $id"* ]] || false
+  [[ $output == *"rustfs (release 20260101T000000Z-abc1234) Up 1 minute (healthy)"* ]] || false
+  [[ $output == *"mimir ready"* ]] || false
+  [[ $output != *"$remote/releases"* ]] || false
   recorded "stats --no-stream"
   recorded "serve status"
   read_only
@@ -908,7 +908,7 @@ $HOME;id' ]
   [ "$status" -eq 0 ]
   O11Y_REMOTE_TAILSCALE=tailscale nas serve-status
   [ "$status" -ne 0 ]
-  [[ $output == *O11Y_REMOTE_TAILSCALE* ]]
+  [[ $output == *O11Y_REMOTE_TAILSCALE* ]] || false
 }
 
 @test "O11Y_PRIVATE_STRINGS is never validated, empty or not" {
@@ -1001,7 +1001,7 @@ two_deploys() {
     # shellcheck disable=SC2086 # each case is a list of words
     O11Y_CONFIRM=rollback nas rollback $args
     [ "$status" -ne 0 ]
-    [[ $output == *"the only argument it takes is --previous"* ]]
+    [[ $output == *"the only argument it takes is --previous"* ]] || false
   done
   [ ! -e "$dir/ssh.log" ]
 }
@@ -1063,7 +1063,7 @@ two_deploys() {
     rm -f "$dir/ssh.log"
     go "$task"
     [ "$status" -ne 0 ]
-    [[ $output == *"the lock exists"* ]]
+    [[ $output == *"the lock exists"* ]] || false
     [ "$(cat "$dir/ssh.log")" = "mkdir -p $remote || exit 3; mkdir $remote/.deploy.lock" ]
   done
   [ -d "$remote/config/.incoming-alloy-000000000000" ]
@@ -1088,7 +1088,7 @@ two_deploys() {
   healthy o11y-gate
   STUB_FAIL="ps -aq" go gate-clean
   [ "$status" -ne 0 ]
-  [[ $output == *"could not be asked for o11y-gate containers"* ]]
+  [[ $output == *"could not be asked for o11y-gate containers"* ]] || false
   ! recorded " run " || false
   [ -d "$remote/gate/data/loki" ]
 }
@@ -1098,7 +1098,7 @@ two_deploys() {
   layout
   STUB_SSH_FAIL_ON="test*-e $remote/gate/data" go gate-test
   [ "$status" -ne 0 ]
-  [[ $output == *"could not be asked whether gate data exists"* ]]
+  [[ $output == *"could not be asked whether gate data exists"* ]] || false
   ! recorded " run " || false
   ! recorded " up -d" || false
 }
@@ -1108,8 +1108,8 @@ two_deploys() {
   layout
   STUB_FAIL_SECOND="down --remove-orphans" go gate-test
   [ "$status" -ne 0 ]
-  [[ $output != *"project is stopped"* ]]
-  [[ $output == *"could not be stopped"* ]]
+  [[ $output != *"project is stopped"* ]] || false
+  [[ $output == *"could not be stopped"* ]] || false
 }
 
 @test "a run that otherwise passed fails when the lock can't be removed" {
@@ -1117,7 +1117,7 @@ two_deploys() {
   go deploy
   STUB_SSH_FAIL_ON="rmdir $remote/.deploy.lock" go down
   [ "$status" -ne 0 ]
-  [[ $output == *"the lock could not be removed"* ]]
+  [[ $output == *"the lock could not be removed"* ]] || false
 }
 
 @test "a run ended by a signal keeps the lock" {
@@ -1126,15 +1126,15 @@ two_deploys() {
   [ "$status" -eq 143 ]
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
-  [[ $output == *"interrupted, so the lock stays"* ]]
+  [[ $output == *"interrupted, so the lock stays"* ]] || false
 }
 
 @test "status measures no container when none of the stack's is running" {
   echo "o11y s3-buckets o11y-s3-buckets-1 files Exited (0) 1 minute ago" >"$dir/containers"
   nas status
   [ "$status" -eq 0 ]
-  [[ $output != *"stats of every container on the host"* ]]
-  [[ $output == *"no running containers to measure"* ]]
+  [[ $output != *"stats of every container on the host"* ]] || false
+  [[ $output == *"no running containers to measure"* ]] || false
 }
 
 @test "remote output reaches the terminal without the deployment's names, paths or tailnet addresses" {
@@ -1161,16 +1161,16 @@ two_deploys() {
   two_deploys
   STUB_SSH_FAIL_ON="*current.new && ln -sfn*" go rollback --previous
   [ "$status" -ne 0 ]
-  [[ $output == *"the pointer swap may not have finished, so the lock stays"* ]]
-  [[ $output == *"current should name release $first and previous release $second"* ]]
-  [[ $output != *"$remote"* ]]
+  [[ $output == *"the pointer swap may not have finished, so the lock stays"* ]] || false
+  [[ $output == *"current should name release $first and previous release $second"* ]] || false
+  [[ $output != *"$remote"* ]] || false
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
   # A retry finds the lock and starts nothing.
   rm "$dir/ssh.log"
   go rollback --previous
   [ "$status" -ne 0 ]
-  [[ $output == *"the lock exists"* ]]
+  [[ $output == *"the lock exists"* ]] || false
   ! recorded " up " || false
 }
 
@@ -1178,7 +1178,7 @@ two_deploys() {
   two_deploys
   STUB_SIGNAL_ON="*current.new && ln -sfn*" go rollback --previous
   [ "$status" -ne 0 ]
-  [[ $output == *"current should name release $first and previous release $second"* ]]
+  [[ $output == *"current should name release $first and previous release $second"* ]] || false
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
 }
@@ -1188,19 +1188,19 @@ two_deploys() {
   healthy o11y
   STUB_SSH_RESOLVE_FAIL=1 nas status
   [ "$status" -ne 0 ]
-  [[ $output == *'Could not resolve hostname $O11Y_SSH_HOST'* ]]
-  [[ $output != *sentinel-host* ]]
+  [[ $output == *'Could not resolve hostname $O11Y_SSH_HOST'* ]] || false
+  [[ $output != *sentinel-host* ]] || false
   grep -q sentinel-host "$repo/tmp/deploy/status.log"
   # The container query, readiness and statistics fail the same way.
   STUB_DOCKER_ERROR=1 nas status
   [ "$status" -ne 0 ]
-  [[ $output == *"error during connect"* ]]
-  [[ $output != *sentinel-host* && $output != *"$remote"* ]]
+  [[ $output == *"error during connect"* ]] || false
+  [[ $output != *sentinel-host* && $output != *"$remote"* ]] || false
   STUB_FAIL=stats nas status
-  [[ $output == *"container statistics are unavailable"* ]]
+  [[ $output == *"container statistics are unavailable"* ]] || false
   STUB_HTTP=000 nas status
   [ "$status" -eq 0 ]
-  [[ $output == *"loki not ready"* ]]
+  [[ $output == *"loki not ready"* ]] || false
 }
 
 @test "logs shows container logs without the tailnet domain, and keeps the raw ones in the task log" {
@@ -1209,7 +1209,7 @@ two_deploys() {
   go deploy
   nas logs grafana
   [ "$status" -eq 0 ]
-  [[ $output == *'GF_SERVER_ROOT_URL=https://grafana.$O11Y_TAILNET_DOMAIN/'* ]]
-  [[ $output != *sentinel-net* ]]
+  [[ $output == *'GF_SERVER_ROOT_URL=https://grafana.$O11Y_TAILNET_DOMAIN/'* ]] || false
+  [[ $output != *sentinel-net* ]] || false
   grep -q "https://grafana.sentinel-net.example.ts.net/" "$repo/tmp/deploy/logs.log"
 }
