@@ -260,6 +260,8 @@ printf 'user = "admin:%s"\n' admin | expect_status 403 -K - "$grafana/api/admin/
 [[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
   die "4: the provisioned dashboard is missing"
 main logs --no-log-prefix grafana >"$out/grafana.log" 2>&1 || die "4: the Grafana log could not be read"
+# A log without provisioning lines would pass the error check vacuously.
+grep -qi 'provisioning' "$out/grafana.log" || die "4: the Grafana log shows no provisioning at all"
 ! grep -i 'provisioning' "$out/grafana.log" | grep -qiE 'level=(error|warn)' ||
   die "4: the Grafana log has a provisioning error"
 ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, provisioning is clean"
