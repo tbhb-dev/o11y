@@ -181,18 +181,10 @@ attempt_cmd() {
   echo "echo $1 >$dir/attempt.new && mv $dir/attempt.new $dir/attempt"
 }
 
-# The two pointer moves. Each is a rename over the old link, so a reader
-# sees the old target or the new one and never a missing link.
-previous_cmd() {
-  echo "cd $dir && ln -sfn releases/$1 previous.new && mv -T previous.new previous"
-}
-
-current_cmd() {
-  echo "cd $dir && ln -sfn releases/$1 current.new && mv -T current.new current"
-}
-
-# swap_cmd <new current> <new previous or nothing>: both pointer moves in
-# one remote command. Both new links exist before either rename, and the
+# swap_cmd <new current> <new previous or nothing>: the pointer moves of a
+# deploy or a rollback, in one remote command. Each is a rename over the old
+# link, so a reader sees the old target or the new one and never a missing
+# link. Both new links exist before either rename, and the
 # remote shell finishes the two renames even when the local side dies or
 # the connection drops, since it has no terminal to lose.
 swap_cmd() {
@@ -244,7 +236,9 @@ cleanup() {
     # has looked at the two pointers.
     # shellcheck disable=SC2086 # two ids
     set -- $swap_pending
-    echo "FAIL $task: the pointer swap may not have finished, so the lock stays. On the host, current should name release $1 and previous release ${2:-none}. Check both links in O11Y_REMOTE_DIR, set them to those releases if they differ, then remove .deploy.lock" >&9
+    local expected="current should name release $1 and previous release ${2:-}"
+    [[ -n ${2:-} && ${2:-} != "$1" ]] || expected="current should name release $1, and previous stays as it was"
+    echo "FAIL $task: the pointer swap may not have finished, so the lock stays. On the host, $expected. Check the links in O11Y_REMOTE_DIR, set them to match, then remove .deploy.lock" >&9
     ((status != 0)) || status=1
   elif [[ $locked -eq 1 ]]; then
     if ((status >= 128)); then
@@ -599,8 +593,7 @@ deploy_plan() {
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
     echo "$docker exec -i <rustfs container> curl ...    # readiness of each service, then the receipt check"
-    echo "$(previous_cmd '<the release current names>')    # skipped on a first deploy"
-    current_cmd "$id"
+    echo "$(swap_cmd "$id" '<the release current names>')    # on a first deploy, only current"
     echo "rmdir $dir/.deploy.lock"
   } | sed 's/^/  /'
 }
@@ -617,9 +610,9 @@ deploy() {
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
-    [[ -z $current || $current == "$id" ]] || quiet remote "$(previous_cmd "$current")" ||
-      die "$task: the previous pointer could not be moved; current still names release $current"
-    quiet remote "$(current_cmd "$id")" || die "$task: the current pointer could not be moved"
+    swap_pending="$id $current"
+    quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id passed the health gate, but the pointers could not be moved"
+    swap_pending=
     ok "$task: release $id passed the health gate and is now current"
     return
   fi

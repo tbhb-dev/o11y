@@ -516,10 +516,11 @@ everything() {
   [ "$status" -eq 0 ]
   second=$(staged)
   [ "$first" != "$second" ]
+  # Both new links first, then both renames, in one remote command.
   in_order "exec -i o11y-rustfs-1 curl" \
-    "ln -sfn releases/$first previous.new && mv -T previous.new previous" \
-    "ln -sfn releases/$second current.new && mv -T current.new current" \
+    "cd $remote && ln -sfn releases/$second current.new && ln -sfn releases/$first previous.new && mv -T previous.new previous && mv -T current.new current" \
     "rmdir $remote/.deploy.lock"
+  [ "$(grep -c 'current.new' "$dir/ssh.log")" -eq 1 ]
   [ "$(readlink "$remote/previous")" = "releases/$first" ]
   [ "$(readlink "$remote/current")" = "releases/$second" ]
 }
@@ -1231,6 +1232,48 @@ two_deploys() {
 }
 
 # --- hardening ------------------------------------------------------------
+
+@test "a deploy promotion cut off by the connection keeps the lock and names both releases" {
+  healthy o11y
+  go deploy
+  first=$(staged)
+  rm "$repo/tmp/deploy/staged" "$dir/ssh.log"
+  sleep 1
+  STUB_SSH_FAIL_ON="*current.new && ln -sfn*" go deploy
+  [ "$status" -ne 0 ]
+  second=$(staged)
+  [[ $output == *"the pointer swap may not have finished, so the lock stays"* ]] || false
+  [[ $output == *"current should name release $second and previous release $first"* ]] || false
+  [[ $output != *"$remote"* ]] || false
+  [ -d "$remote/.deploy.lock" ]
+  ! recorded "rmdir $remote/.deploy.lock" || false
+  rm "$dir/ssh.log"
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"the lock exists"* ]] || false
+  ! recorded " up " || false
+}
+
+@test "a first deploy whose promotion is cut off says previous stays as it was" {
+  healthy o11y
+  STUB_SSH_FAIL_ON="*ln -sfn releases/*current.new*" go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"current should name release $(staged), and previous stays as it was"* ]] || false
+  [ -d "$remote/.deploy.lock" ]
+}
+
+@test "a deploy promotion interrupted by a signal keeps the lock and names both releases" {
+  healthy o11y
+  go deploy
+  first=$(staged)
+  rm "$repo/tmp/deploy/staged" "$dir/ssh.log"
+  sleep 1
+  STUB_SIGNAL_ON="*current.new && ln -sfn*" go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"current should name release $(staged) and previous release $first"* ]] || false
+  [ -d "$remote/.deploy.lock" ]
+  ! recorded "rmdir $remote/.deploy.lock" || false
+}
 
 @test "all a task prints has reached its output by the time the task exits" {
   STUB_SLOW_TEE=1 bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
