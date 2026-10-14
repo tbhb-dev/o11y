@@ -70,7 +70,10 @@ init() {
 # remove the scratch directory. A local run also removes its project. The
 # writer is a Compose client running a probe container: killing the client
 # leaves the container, so Compose kills that too, and only then is the
-# background job reaped.
+# background job reaped. A killed client can't remove its stopped one-off
+# container either, and Compose 2.20.1 removes those only with down, which
+# would also stop the stack. A local run's down removes it; in --release
+# mode the caller removes it with docker.
 writer=
 scratch=$(mktemp -d)
 finish() {
