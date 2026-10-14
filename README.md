@@ -33,6 +33,15 @@ Everything the stack keeps on the host is under `$O11Y_REMOTE_DIR`. Each deploy 
 
 A rollback restores files and image versions, not data. A newer Grafana or backend may already have converted what it stored to a newer format, so going back can cost telemetry.
 
+### A stale lock
+
+A task stopped by a signal, a dropped connection or an incomplete rollback leaves `.deploy.lock` in `$O11Y_REMOTE_DIR`, and every task that changes the host refuses to start while it's there. Before you remove it:
+
+1. On the host, list the processes and make sure no `docker-compose` or `docker` command from an earlier run is still going.
+2. Run `mise run status` and note the release the containers run.
+3. Compare that with the `current` and `previous` links in `$O11Y_REMOTE_DIR`. After an interrupted rollback, its message gives the release each link should point at. Set them to match before you go on.
+4. Remove the lock with `rmdir`.
+
 See [AGENTS.md](AGENTS.md) for the conventions that apply to contributors and coding agents.
 
 ## License
