@@ -19,6 +19,8 @@
     // Real private values; the leak check reads this file, nothing else should.
     "mise.local.toml",
     "mise.lock",
+    // Private values, gitignored; nothing in it belongs in a dictionary.
+    "mise.local.toml",
     "tmp/**/*",
     "vendir.lock.yml"
   ],

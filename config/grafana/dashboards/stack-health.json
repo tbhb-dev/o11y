@@ -1,0 +1,50 @@
+{
+  "uid": "o11y-stack-health",
+  "title": "Stack health",
+  "tags": ["o11y"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "1m",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Up",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
+      "targets": [{ "refId": "A", "expr": "up", "legendFormat": "{{job}}" }]
+    },
+    {
+      "id": 2,
+      "title": "Resident memory",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "process_resident_memory_bytes",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Uptime",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "mimir" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 6 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - process_start_time_seconds",
+          "legendFormat": "{{job}}"
+        }
+      ]
+    }
+  ]
+}

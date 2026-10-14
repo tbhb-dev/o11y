@@ -1,0 +1,55 @@
+---
+# Tempo, monolithic (-target=all). The S3 key comes from the AWS_* variables
+# in the environment, so no key appears in this file.
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: info
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://mimir:8080/api/v1/push
+        send_exemplars: true
+
+# >>> storage (rustfs s3) >>>
+storage:
+  trace:
+    backend: s3
+    s3:
+      bucket: tempo
+      endpoint: rustfs:9000
+      region: us-east-1
+      insecure: true
+      forcepathstyle: true
+    wal:
+      path: /var/tempo/wal
+# <<< storage <<<
+
+backend_worker:
+  compaction:
+    block_retention: 336h
+    compacted_block_retention: 1h
+
+overrides:
+  defaults:
+    metrics_generator:
+      processors: ["span-metrics", "service-graphs"]
+      generate_native_histograms: both
+
+usage_report:
+  reporting_enabled: false

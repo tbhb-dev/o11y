@@ -1,0 +1,30 @@
+---
+# Test-only services. Both sit behind the "tools" profile, so `up` never
+# starts them; the test scripts run them with `run --rm` on the stack's
+# network.
+name: o11y
+
+x-logging: &logging
+  driver: json-file
+  options: {max-size: 10m, max-file: "3"}
+
+services:
+  telemetrygen:
+    # yamllint disable-line rule:line-length
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:v0.162.0@sha256:5350f77dbc914034321dc7629058e141996c8dc2cdde076d281e573efee1a67e
+    profiles: ["tools"]
+    restart: "no"
+    logging: *logging
+
+  s3probe:
+    image: amazon/aws-cli:2.37.13@sha256:d32864c20087d486f5988c3e70817d67a73f584a47535cada9ad97e0ea1e5196
+    profiles: ["tools"]
+    restart: "no"
+    logging: *logging
+    env_file: ${O11Y_S3_ENV_FILE:?}
+    environment:
+      AWS_ENDPOINT_URL: http://rustfs:9000
+      AWS_DEFAULT_REGION: us-east-1
+    entrypoint: ["/bin/sh", "/probe/probe.sh"]
+    volumes:
+      - ${O11Y_CONFIG_PROBE:?}:/probe:ro

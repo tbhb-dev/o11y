@@ -1,0 +1,66 @@
+---
+# Mimir, monolithic, classic ingestion: no ingest_storage block. Run with
+# -config.expand-env=true: the S3 key comes from the environment.
+target: all
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 8080
+  grpc_listen_port: 9095
+  log_level: warn
+
+# >>> storage (rustfs s3) >>>
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: rustfs:9000
+      region: us-east-1
+      insecure: true
+      bucket_lookup_type: path
+      access_key_id: ${AWS_ACCESS_KEY_ID}
+      secret_access_key: ${AWS_SECRET_ACCESS_KEY}
+blocks_storage:
+  s3: {bucket_name: mimir-blocks}
+  tsdb: {dir: /data/tsdb}
+  bucket_store: {sync_dir: /data/tsdb-sync}
+ruler_storage:
+  s3: {bucket_name: mimir-ruler}
+# <<< storage <<<
+
+compactor:
+  data_dir: /data/compactor
+  sharding_ring:
+    kvstore:
+      store: memberlist
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+
+ingester:
+  ring:
+    instance_addr: 127.0.0.1
+    kvstore:
+      store: memberlist
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+ruler:
+  rule_path: /data/ruler
+
+limits:
+  compactor_blocks_retention_period: 90d
+  max_global_exemplars_per_user: 100000
+  otel_metric_suffixes_enabled: true
+  ingestion_rate: 20000
+  ingestion_burst_size: 400000
+  max_global_series_per_user: 500000
+
+usage_stats:
+  enabled: false

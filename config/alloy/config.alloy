@@ -1,0 +1,108 @@
+// The only ingestion path. OTLP arrives on 4317 (gRPC) and 4318 (HTTP) and
+// fans out by signal: traces to Tempo, logs to Loki, metrics to Mimir.
+
+otelcol.receiver.otlp "default" {
+	grpc {
+		endpoint = "0.0.0.0:4317"
+	}
+
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.default.input]
+		logs    = [otelcol.processor.memory_limiter.default.input]
+		traces  = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+otelcol.processor.memory_limiter "default" {
+	check_interval = "1s"
+	limit          = "384MiB"
+
+	output {
+		metrics = [otelcol.processor.transform.resource.input]
+		logs    = [otelcol.processor.transform.resource.input]
+		traces  = [otelcol.processor.transform.resource.input]
+	}
+}
+
+// Loki indexes deployment.environment.name as a label. Older SDKs send
+// deployment.environment, so copy it across when the new name is absent.
+otelcol.processor.transform "resource" {
+	error_mode = "ignore"
+
+	trace_statements {
+		context    = "resource"
+		statements = [`set(attributes["deployment.environment.name"], attributes["deployment.environment"]) where attributes["deployment.environment.name"] == nil and attributes["deployment.environment"] != nil`]
+	}
+
+	metric_statements {
+		context    = "resource"
+		statements = [`set(attributes["deployment.environment.name"], attributes["deployment.environment"]) where attributes["deployment.environment.name"] == nil and attributes["deployment.environment"] != nil`]
+	}
+
+	log_statements {
+		context    = "resource"
+		statements = [`set(attributes["deployment.environment.name"], attributes["deployment.environment"]) where attributes["deployment.environment.name"] == nil and attributes["deployment.environment"] != nil`]
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.default.input]
+		logs    = [otelcol.processor.batch.default.input]
+		traces  = [otelcol.processor.batch.default.input]
+	}
+}
+
+otelcol.processor.batch "default" {
+	timeout         = "5s"
+	send_batch_size = 2000
+
+	output {
+		metrics = [otelcol.exporter.otlphttp.mimir.input]
+		logs    = [otelcol.exporter.otlphttp.loki.input]
+		traces  = [otelcol.exporter.otlp.tempo.input]
+	}
+}
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+otelcol.exporter.otlphttp "loki" {
+	client {
+		endpoint = "http://loki:3100/otlp"
+	}
+}
+
+otelcol.exporter.otlphttp "mimir" {
+	client {
+		endpoint = "http://mimir:8080/otlp"
+	}
+}
+
+// Self-monitoring: scrape the stack's own /metrics into Mimir.
+prometheus.scrape "stack" {
+	targets = [
+		{"__address__" = "127.0.0.1:12345", "job" = "alloy"},
+		{"__address__" = "loki:3100", "job" = "loki"},
+		{"__address__" = "tempo:3200", "job" = "tempo"},
+		{"__address__" = "mimir:8080", "job" = "mimir"},
+		{"__address__" = "grafana:3000", "job" = "grafana"},
+	]
+	scrape_interval = "30s"
+	forward_to      = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.remote_write "mimir" {
+	endpoint {
+		url = "http://mimir:8080/api/v1/push"
+	}
+}

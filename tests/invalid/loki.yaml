@@ -1,0 +1,6 @@
+---
+# Deliberately invalid: an unknown top-level key. tools/validate.sh requires
+# the Loki validator to reject this file.
+auth_enabled: false
+not_a_loki_section:
+  enabled: true

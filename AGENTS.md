@@ -6,7 +6,7 @@ Guidance for AI coding agents working in this repository. This file is the canon
 
 This repository holds configuration for a self-hosted observability stack built from Grafana, Loki, Tempo, Mimir and Grafana Alloy, run with Docker Compose. It contains YAML and Alloy configuration, shell scripts, mise tasks that deploy over SSH, and Markdown docs. It has no Go or Python app code. The one Python file, `tools/apm_audit.py`, belongs to the toolchain.
 
-The repository is at the bootstrap stage, and the stack itself is still to come. Compose and Alloy validation is a follow-up that needs a human decision on which tool joins the shared baseline.
+One Compose project runs the stack, with RustFS as the S3 object store for Loki, Tempo, and Mimir. To check it, run `mise run validate`, `mise run rustfs-probe` and `mise run smoke`, each of which needs a Docker engine. Deploy tasks are still to come.
 
 ## Public repository
 
@@ -33,6 +33,14 @@ Range and push scans read whole objects through `git cat-file`, never a diff. Th
 At commit the hooks run `--staged` and scan the message file. At push, `tools/install-pre-push.sh` puts the check in front of prek's pre-push hook, because prek hides the ref lines from its hooks. `mise run bootstrap` installs it, and `mise run lint` fails locally when it's missing. `mise run lint` also scans the tree, and `lint-pr-description` adds `PR_AGENTDESC.md`. CI scans the tree and `--range origin/main..HEAD`.
 
 The check guards against accidents in a cooperative workflow. It doesn't catch a value that's URL-encoded or otherwise transformed, a value split across lines, or a literal under four characters, and an entry of `O11Y_PRIVATE_STRINGS` can't contain a comma. It doesn't stop `git push --no-verify`, a clone without the hook installed, or text typed into GitHub, such as a pull request title or review comment. Only the second set runs in CI, because the private values never leave the owner's machine, so CI catches address and path shapes but not an arbitrary host name or login. The script prints a notice whenever it runs without private values. History already pushed isn't rechecked. When you run `--pre-push` by hand without ref lines, it scans the full history behind your current commit and so reports pattern hits in old history. A branch cut before this check merged has no `tools/check-leaks.sh`. The installed hook then prints one warning and skips the check, which leaves a transitional gap on such branches.
+
+## Stack secrets
+
+The init one-shot generates the S3 key and the Grafana recovery password on the host that runs the stack. Keep both out of committed files, rendered files, command lines, logs, and task output.
+
+Compose prints the contents of every environment file a model loads. Against the environment file of a deployment, run `config` only with `-q`. To read a resolved model, run `mise run compose-config` instead. It renders with placeholders and loads a dummy file, and it ignores inherited variables. In a task, run `docker inspect` on the stack's containers only with a `-f` template that can't print `Config.Env`. Their environment contains the S3 key.
+
+Published ports bind to 127.0.0.1. Don't add a setting that changes that, because Grafana gives anonymous users the Editor role and whatever fronts the host decides who reaches it.
 
 ## Tools
 

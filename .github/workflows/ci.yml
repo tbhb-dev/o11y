@@ -115,3 +115,61 @@ jobs:
 
       - name: Test
         run: mise run test
+
+  # Static checks of the stack: the Compose models load with the pinned
+  # Compose, and each component's own config check, run from its pinned
+  # image, accepts the real config and rejects a deliberately invalid one.
+  validate:
+    name: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the toolchain
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.3
+
+      - name: Validate
+        run: mise run validate
+
+  # Boots the stack on the runner's Docker engine. The probe exercises
+  # RustFS alone first, so an object store fault is not mistaken for a
+  # backend fault; the boot test then proves that telemetry sent through
+  # Alloy is stored in RustFS and returned through Grafana.
+  smoke:
+    name: smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Harden the runner
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: audit
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up the toolchain
+        uses: jdx/mise-action@2d8d4cafcbd33be2ea37d2b6f5ad595363d1f1ca # v5.1.1
+        with:
+          # renovate: datasource=github-releases depName=jdx/mise
+          version: 2026.10.3
+
+      - name: Probe RustFS
+        run: mise run rustfs-probe
+
+      - name: Boot test
+        run: mise run smoke
