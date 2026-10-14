@@ -46,10 +46,11 @@
 #
 # Output is variable names, release ids and pass or fail lines. What the
 # remote commands print goes to tmp/deploy/<task>.log, which is private.
-# Where a task shows remote output, such as versions or the serve
-# configuration, it first replaces the deployment's paths, names and tailnet
-# addresses with placeholders. deploy-plan and grafana-password are the only
-# tasks that print private values.
+# Where a task shows remote output, such as versions, the serve
+# configuration, container logs or an SSH error, it first replaces the
+# deployment's paths, names and tailnet addresses with placeholders.
+# deploy-plan and grafana-password are the only tasks that print private
+# values.
 # Never add `set -x`: the commands hold deployment paths.
 set -euo pipefail
 umask 077
@@ -953,6 +954,11 @@ if [[ $task != smoke-remote && $task != grafana-password ]]; then
   log=tmp/deploy/$task.log
   : >"$log"
 fi
+# The tasks that show remote output send all of it, remote and SSH
+# diagnostics included, through redact; the raw text goes to the task log.
+case $task in
+preflight | status | logs | serve-apply | serve-status | serve-clear) exec > >(tee -a "$log" | redact) 2>&1 ;;
+esac
 exec 9>&2
 trap cleanup EXIT
 trap 'exit 130' INT

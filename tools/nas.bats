@@ -26,6 +26,10 @@ setup() {
   stub "$dir/bin/ssh" <<'STUB'
 for command; do :; done
 [ -z "${STUB_SSH_DOWN:-}" ] || exit 255
+if [ -n "${STUB_SSH_RESOLVE_FAIL:-}" ]; then
+  echo "ssh: Could not resolve hostname $O11Y_SSH_HOST: Name or service not known" >&2
+  exit 255
+fi
 if [ -n "${STUB_SSH_FAIL_ON:-}" ]; then
   # shellcheck disable=SC2254 # the variable is a pattern
   case $command in $STUB_SSH_FAIL_ON) exit 255 ;; esac
@@ -86,6 +90,12 @@ STUB
 printf '%s\n' "$@" >"$STUB/docker.args"
 all="$*"
 case $all in *"${STUB_FAIL:-no failure}"*) exit 1 ;; esac
+# STUB_DOCKER_ERROR makes docker fail the way a broken daemon does, naming
+# the host and a path in its message.
+if [ -n "${STUB_DOCKER_ERROR:-}" ]; then
+  echo "error during connect on $O11Y_SSH_HOST: open $O11Y_REMOTE_DIR/x: no such file" >&2
+  exit 1
+fi
 project=${all##*label=com.docker.compose.project=}
 project=${project%% *}
 case $1 in
@@ -160,6 +170,10 @@ case $all in
 *"version --short"*) echo v2.20.1-stub ;;
 *"s3probe count"*) echo 3 ;;
 *logs*rustfs*) [ ! -f "$STUB/rustfs.log" ] || cat "$STUB/rustfs.log" ;;
+*logs*)
+  # Grafana logs the environment overrides it starts with.
+  echo "logger=settings msg=\"Config overridden from Environment variable\" var=\"GF_SERVER_ROOT_URL=https://grafana.$O11Y_TAILNET_DOMAIN/\""
+  ;;
 esac
 exit 0
 STUB
@@ -1167,4 +1181,35 @@ two_deploys() {
   [[ $output == *"current should name release $first and previous release $second"* ]]
   [ -d "$remote/.deploy.lock" ]
   ! recorded "rmdir $remote/.deploy.lock" || false
+}
+
+@test "status shows SSH and docker failures without the deployment's names" {
+  export O11Y_SSH_HOST=sentinel-host
+  healthy o11y
+  STUB_SSH_RESOLVE_FAIL=1 nas status
+  [ "$status" -ne 0 ]
+  [[ $output == *'Could not resolve hostname $O11Y_SSH_HOST'* ]]
+  [[ $output != *sentinel-host* ]]
+  grep -q sentinel-host "$repo/tmp/deploy/status.log"
+  # The container query, readiness and statistics fail the same way.
+  STUB_DOCKER_ERROR=1 nas status
+  [ "$status" -ne 0 ]
+  [[ $output == *"error during connect"* ]]
+  [[ $output != *sentinel-host* && $output != *"$remote"* ]]
+  STUB_FAIL=stats nas status
+  [[ $output == *"container statistics are unavailable"* ]]
+  STUB_HTTP=000 nas status
+  [ "$status" -eq 0 ]
+  [[ $output == *"loki not ready"* ]]
+}
+
+@test "logs shows container logs without the tailnet domain, and keeps the raw ones in the task log" {
+  export O11Y_TAILNET_DOMAIN=sentinel-net.example.ts.net
+  healthy o11y
+  go deploy
+  nas logs grafana
+  [ "$status" -eq 0 ]
+  [[ $output == *'GF_SERVER_ROOT_URL=https://grafana.$O11Y_TAILNET_DOMAIN/'* ]]
+  [[ $output != *sentinel-net* ]]
+  grep -q "https://grafana.sentinel-net.example.ts.net/" "$repo/tmp/deploy/logs.log"
 }
