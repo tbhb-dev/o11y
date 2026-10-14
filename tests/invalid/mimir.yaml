@@ -1,0 +1,6 @@
+---
+# Deliberately invalid: an unknown top-level key. tools/validate.sh requires
+# the Mimir validator to reject this file.
+target: all
+not_a_mimir_section:
+  enabled: true

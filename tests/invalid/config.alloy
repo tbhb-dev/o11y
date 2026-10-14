@@ -1,0 +1,11 @@
+// Deliberately invalid: forwards to a component that is not defined.
+// tools/validate.sh requires the Alloy validator to reject this file.
+otelcol.receiver.otlp "default" {
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	output {
+		traces = [otelcol.exporter.otlp.missing.input]
+	}
+}

@@ -18,5 +18,24 @@
     "github>tbhb-dev/devtools//.github/renovate-config.json5#d80265aa04fd10bbfe3965200ddbe3d5d1563c38", // v0.10.0
   ],
 
+  packageRules: [
+    // The stack's images move together, tag and index digest as a pair,
+    // so one pull request shows what a set of upgrades does to the boot
+    // test. The shared preset pins digests for GitHub Actions only.
+    {
+      matchManagers: ["docker-compose"],
+      pinDigests: true,
+      groupName: "o11y-stack",
+    },
+    // RustFS holds every backend's data and is young, so an upgrade is a
+    // decision of its own: a separate pull request, never merged by itself.
+    {
+      matchManagers: ["docker-compose"],
+      matchPackageNames: ["rustfs/rustfs"],
+      groupName: "rustfs",
+      automerge: false,
+    },
+  ],
+
   repositories: ["tbhb-dev/o11y"],
 }

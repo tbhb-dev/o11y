@@ -1,0 +1,7 @@
+---
+# Deliberately invalid: an unknown top-level key. tools/validate.sh requires
+# the Tempo validator to reject this file.
+server:
+  http_listen_port: 3200
+not_a_tempo_section:
+  enabled: true
