@@ -854,6 +854,53 @@ $t serve status" ]
   [[ $output == *"FAIL preflight: sudo -n runs docker-compose"* ]]
 }
 
+# df_without_type: a df that prints - for the type, as one does when the
+# mount table doesn't name it, and a stat that reads it from the filesystem
+# and records the path it was asked about.
+df_without_type() {
+  stub "$dir/bin/df" <<'STUB'
+echo "Filesystem Type 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake - 1000 10 990 1% /"
+STUB
+  stub "$dir/bin/stat" <<'STUB'
+[ "$1 $2 $3" = "-f -c %T" ] || exit 1
+echo "$4" >"$STUB/stat.args"
+echo btrfs
+STUB
+}
+
+@test "preflight names the filesystem of the nearest existing ancestor of O11Y_REMOTE_DIR" {
+  df_without_type
+  nas preflight
+  [ "$status" -eq 0 ]
+  [[ $output == *"ok preflight: filesystem where O11Y_REMOTE_DIR will live: btrfs"* ]] || false
+  [ "$(cat "$dir/stat.args")" = "$host" ]
+  [ ! -e "$remote" ]
+  read_only
+}
+
+@test "gate-test names the filesystem through stat when df prints none" {
+  healthy o11y-gate
+  layout
+  df_without_type
+  go gate-test
+  [ "$status" -eq 0 ]
+  [[ $output == *"filesystem under O11Y_REMOTE_DIR: $(uname -r) btrfs"* ]] || false
+  [ "$(cat "$dir/stat.args")" = "$remote" ]
+}
+
+@test "the filesystem is reported as unknown, not left empty, when neither df nor stat names it" {
+  healthy o11y-gate
+  layout
+  stub "$dir/bin/df" <<<'echo "df: invalid option -- T" >&2; exit 1'
+  stub "$dir/bin/stat" <<<'exit 1'
+  go gate-test
+  [ "$status" -eq 0 ]
+  [[ $output == *"filesystem under O11Y_REMOTE_DIR: $(uname -r) unknown"* ]] || false
+  nas preflight
+  [[ $output == *"filesystem where O11Y_REMOTE_DIR will live: unknown"* ]] || false
+}
+
 @test "the SSH control socket stays under the socket path limit however long TMPDIR is" {
   mv "$dir/bin/ssh" "$dir/bin/ssh.stub"
   stub "$dir/bin/ssh" <<'STUB'

@@ -538,6 +538,14 @@ up_cmd() {
   echo "$(compose_cmd o11y "$dir/releases/$1" .env compose.yaml) up -d --remove-orphans"
 }
 
+# fs_type_cmd: the type of the filesystem under O11Y_REMOTE_DIR, or under
+# its nearest existing ancestor before the first stage, else "unknown".
+# df -T names it from the mount table. Where df lacks -T, or prints - because
+# the table doesn't name the type, stat reads it from the filesystem itself.
+fs_type_cmd() {
+  echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; t=\$(df -PT \"\$d\" 2>/dev/null | awk 'NR == 2 { print \$2 }'); case \$t in '' | -) t=\$(stat -f -c %T \"\$d\" 2>/dev/null) ;; esac; echo \"\${t:-unknown}\""
+}
+
 # --- tasks ----------------------------------------------------------------
 
 preflight() {
@@ -571,6 +579,7 @@ preflight() {
     "netstat -ltn | grep -E $(q ":($grafana_port|$grpc_port|$http_port) ") || true"
   fact noted "kilobytes free where O11Y_REMOTE_DIR will live" text \
     "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4 }'"
+  fact noted "filesystem where O11Y_REMOTE_DIR will live" text "$(fs_type_cmd)"
   fact noted "existing containers" lines "$docker ps -a --format $(q '{{.Names}} {{.Image}} {{.Status}}')"
   [[ $failed -eq 0 ]] || die "$task: a required fact does not hold"
 }
@@ -832,7 +841,7 @@ gate_test() {
   *) die "$task: the host could not be asked whether gate data exists" ;;
   esac
 
-  facts=$(remote "uname -r; df -PT $dir | awk 'NR == 2 { print \$2 }'" | redact | tr '\n' ' ') || facts=unknown
+  facts=$(remote "uname -r; $(fs_type_cmd)" | redact | tr '\n' ' ') || facts=unknown
   echo "note $task: kernel and filesystem under O11Y_REMOTE_DIR: $facts"
 
   while read -r service binary flag; do
