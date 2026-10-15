@@ -81,8 +81,11 @@ otelcol.processor.batch "default" {
 // below the memory_limiter's 384MiB and the container's 768m. A stream past
 // the limit is dropped, not stored.
 // One hour outlasts the export interval and the idle stretches of a live
-// session; a stream that comes back after that restarts from zero, which
-// rate() reads as a counter reset.
+// session. The state lives in memory only, so a stream that comes back
+// after that, or after Alloy restarts, starts again from its first new
+// delta. Mimir here keeps no start timestamps, so rate() sees that as a
+// reset only when the new total is below the last one, and otherwise
+// reports too little across the gap.
 otelcol.processor.deltatocumulative "default" {
 	max_streams = 20000
 	max_stale   = "1h"

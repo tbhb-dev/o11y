@@ -104,6 +104,24 @@ rustfs_log_ok() {
   ! grep -qiE 'rustfsadmin|is not set|default root credentials|ENOSYS|Function not implemented|Unsupported filesystem' <<<"$log"
 }
 
+# Reads Mimir's /metrics exposition on stdin and prints how many samples it
+# has discarded as otlp_parse_error. Mimir exports no discard series until
+# its first discard, so an absent series counts as zero, but only in text
+# that is Mimir's exposition: anything else fails, so a failed scrape can't
+# pass for no discards.
+otlp_parse_discards() {
+  awk '
+    $0 == "# TYPE cortex_build_info gauge" { mimir = 1 }
+    /^cortex_discarded_samples_total\{/ && /reason="otlp_parse_error"/ {
+      if ($NF !~ /^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$/) bad = 1
+      n += $NF
+    }
+    END {
+      if (!mimir || bad) exit 1
+      print n + 0
+    }'
+}
+
 # expect_status <status> <curl arguments...>: the request must complete and
 # answer with exactly that status. A transport failure or any other status
 # fails, so an outage cannot pass for a refusal.

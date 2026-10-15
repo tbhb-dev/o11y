@@ -146,13 +146,42 @@ for component in loki tempo mimir alloy; do
   fi
 done
 
+# below_ga <log>: the components Alloy's log names as below generally
+# available, one per line. It fails unless every error line is either such a
+# diagnostic, in Alloy's exact wording, or the closing "validation failed",
+# and the closing line is there.
+below_ga() {
+  awk '
+    $0 == "Error: validation failed" { closed = 1; next }
+    /^Error: / {
+      if ($0 ~ /^Error: [^ ]+: component "[^"]+" is at stability level "[a-z-]+", which is below the minimum allowed stability level "generally-available"\. Use --stability\.level command-line flag to enable "[a-z-]+" features$/) {
+        split($0, part, "\"")
+        print part[2]
+      } else {
+        unknown = 1
+      }
+    }
+    END { exit (unknown || !closed) }
+  ' "$1"
+}
+
 # The stability level is process-wide, so it would admit any experimental
-# component. At the default level Alloy names every component below it, and
-# the one it names must be the one the level was lowered for.
-if run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy; then
+# component. At the default level Alloy exits 1 and names every component
+# below it, and the one it names must be the one the level was lowered for.
+status=0
+run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy || status=$?
+if [[ $status -eq 0 ]]; then
   echo "FAIL alloy: config.alloy passes at the default stability level, so $alloy_stability is not needed" >&2
   failed=1
-elif [[ $(sed -n 's/.*component "\([^"]*\)" is at stability level.*/\1/p' "$log" | sort -u) != otelcol.processor.deltatocumulative ]]; then
+elif [[ $status -ne 1 ]]; then
+  echo "FAIL alloy: the check at the default stability level did not run (exit $status)" >&2
+  cat "$log" >&2
+  failed=1
+elif ! below=$(below_ga "$log"); then
+  echo "FAIL alloy: Alloy's output at the default stability level holds an error this check doesn't recognize" >&2
+  cat "$log" >&2
+  failed=1
+elif [[ $(sort -u <<<"$below") != otelcol.processor.deltatocumulative ]]; then
   echo "FAIL alloy: config.alloy uses a component below generally available other than otelcol.processor.deltatocumulative" >&2
   cat "$log" >&2
   failed=1

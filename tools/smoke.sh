@@ -402,8 +402,7 @@ ok "10: no sentinel secret in the rendered output, container logs, process argum
 # discarded nothing. Its counter is read from Mimir itself, not from the
 # scraped copy, which lags by a scrape interval.
 discarded() {
-  main exec -T rustfs curl -sS -m 10 http://mimir:8080/metrics |
-    awk '/^cortex_discarded_samples_total\{/ && /reason="otlp_parse_error"/ { n += $NF } END { print n + 0 }'
+  main exec -T rustfs curl -sS --fail -m 10 http://mimir:8080/metrics | otlp_parse_discards
 }
 # sum_point <name> <temporality: 1 delta, 2 cumulative> <value> <start> <end>
 sum_point() {
@@ -434,4 +433,16 @@ poll 60 arrived ||
   die "11: Mimir holds delta $(mimir_value o11y_smoke_delta_total) and cumulative $(mimir_value o11y_smoke_cumulative_total), not 7 and 5"
 after=$(discarded) || die "11: Mimir's discarded samples could not be read"
 [[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error"
-ok "11: two delta points arrive in Mimir as one cumulative series at their sum, a cumulative point as itself, and Mimir discards none"
+# The conversion's state is in memory, so after a restart the same stream
+# starts again from its next delta: 2, not 9.
+delta_after_restart() {
+  [[ $(mimir_value o11y_smoke_delta_total) == 2 ]]
+}
+main restart alloy >/dev/null 2>&1 || die "11: alloy did not restart"
+wait_ready alloy
+now=$(date +%s)
+send_point o11y_smoke_delta 1 2 "$((now - 5))" "$now" || die "11: Alloy refused the delta point after its restart"
+poll 60 delta_after_restart || die "11: after a restart Mimir holds delta $(mimir_value o11y_smoke_delta_total), not 2"
+after=$(discarded) || die "11: Mimir's discarded samples could not be read"
+[[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error after Alloy restarted"
+ok "11: two delta points arrive in Mimir as one cumulative series at their sum, a cumulative point as itself, a restarted Alloy starts the series again, and Mimir discards none"
