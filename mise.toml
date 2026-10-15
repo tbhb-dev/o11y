@@ -247,6 +247,12 @@ run = "bats tools/nas.bats"
 description = "Run the deploy host tasks end to end against the local Docker engine, with ssh, sudo and tailscale stubbed"
 run = "bash tools/nas-rehearsal.sh"
 
+# Local only, and run once before a host deploy rather than in CI: it boots
+# the stack under client load and stops Mimir for five minutes.
+[tasks.fault-run]
+description = "Stop Mimir for five minutes under client load and record receipts, restarts and raw cgroup memory"
+run = "bash tools/fault-run.sh"
+
 [tasks.test]
 description = "Run every test suite"
 run = [

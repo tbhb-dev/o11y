@@ -120,6 +120,13 @@ services:
       - --storage.path=/var/lib/alloy/data
       - --server.http.listen-addr=0.0.0.0:12345
       - --disable-reporting
+    # The Go runtime collects harder below this soft target, ahead of the
+    # kernel's mem_limit. The grace period lets a stop with healthy backends
+    # drain the queues.
+    environment:
+      GOMEMLIMIT: 600MiB
+      O11Y_CLUSTER: ${O11Y_CLUSTER:-o11y}
+    stop_grace_period: 30s
     volumes:
       - ${O11Y_CONFIG_ALLOY:?}:/etc/alloy:ro
       - ${O11Y_DATA_DIR:?}/alloy:/var/lib/alloy/data

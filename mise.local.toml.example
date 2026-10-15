@@ -13,6 +13,10 @@ O11Y_NODE_ADDR = "192.0.2.10"
 # Comma-separated extra strings to keep out of the repository, such as other
 # host names or a model identifier. May be empty.
 O11Y_PRIVATE_STRINGS = ""
+# The cluster label on the stack's self-metrics. Leave it unset for the
+# default, o11y; a site name set here is private and the leak check treats it
+# that way.
+# O11Y_CLUSTER = ""
 # GiB that preflight, gate-test and deploy require free under O11Y_REMOTE_DIR,
 # on top of 10 percent of the filesystem. Not private.
 # O11Y_DISK_RESERVE_GB = "50"

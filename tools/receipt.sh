@@ -3,14 +3,18 @@
 # queried back with exact values. Every signal carries a fresh run id, so a
 # stale or unrelated series cannot satisfy a check.
 #
-#   tools/receipt.sh [--state-file <file>] [--grpc -- <telemetrygen command...>]
-#   tools/receipt.sh --recheck <file>
+#   tools/receipt.sh [--signals <list>] [--state-file <file>] [--grpc -- <telemetrygen command...>]
+#   tools/receipt.sh [--signals <list>] --recheck <file>
 #
 # Signals go to Alloy as OTLP/HTTP JSON. Queries go through Grafana's
 # datasource proxy with no credentials, which also proves anonymous access
 # and the provisioned datasources. --state-file records the run so --recheck
 # can query the same three signals again later without sending anything,
 # after a restart or once a backend has to answer from the object store.
+#
+# --signals limits the run to a comma-separated subset of traces, logs and
+# metrics, such as traces,logs while Mimir is down. Only those are sent and
+# checked. The default is all three.
 #
 # --grpc sends one more trace over OTLP gRPC. The caller supplies the
 # telemetrygen command up to its endpoint flags, because how to reach the
@@ -28,7 +32,7 @@ grafana=${O11Y_CHECK_GRAFANA_URL%/}
 read -r -a curl_cmd <<<"${O11Y_CHECK_CURL:-curl}"
 
 usage() {
-  echo "usage: receipt.sh [--state-file <file>] [--grpc -- <telemetrygen command...>] | --recheck <file>" >&2
+  echo "usage: receipt.sh [--signals <list>] [--state-file <file>] [--grpc -- <telemetrygen command...>] | [--signals <list>] --recheck <file>" >&2
   exit 2
 }
 
@@ -36,8 +40,14 @@ state=
 recheck=
 grpc=0
 telemetrygen=()
+signals=traces,logs,metrics
 while [[ $# -gt 0 ]]; do
   case $1 in
+  --signals)
+    [[ $# -ge 2 && $2 =~ ^(traces|logs|metrics)(,(traces|logs|metrics))*$ ]] || usage
+    signals=$2
+    shift 2
+    ;;
   --state-file)
     state=$2
     shift 2
@@ -61,6 +71,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 [[ $grpc -eq 0 || ${#telemetrygen[@]} -gt 0 ]] || usage
+[[ $grpc -eq 0 || ,$signals, == *,traces,* ]] || usage
+
+# wanted <signal>: the run covers it.
+wanted() {
+  [[ ,$signals, == *,$1,* ]]
+}
 
 die() {
   echo "FAIL receipt: $*" >&2
@@ -147,10 +163,10 @@ grpc_found() {
 if [[ -n $recheck ]]; then
   read -r run_id trace_id value sent <"$recheck"
   service=o11y-check-$run_id
-  poll 60 trace_found || die "trace $trace_id is no longer returned"
-  poll 60 log_found 0 || die "the log line of run $run_id is no longer returned"
-  poll 60 metric_stored || die "the metric sample of run $run_id is no longer returned"
-  echo "ok receipt: run $run_id still returns its trace, log and metric"
+  ! wanted traces || poll 60 trace_found || die "trace $trace_id is no longer returned"
+  ! wanted logs || poll 60 log_found 0 || die "the log line of run $run_id is no longer returned"
+  ! wanted metrics || poll 60 metric_stored || die "the metric sample of run $run_id is no longer returned"
+  echo "ok receipt: run $run_id still returns its ${signals//,/, }"
   exit 0
 fi
 
@@ -164,16 +180,22 @@ service=o11y-check-$run_id
 resource='{"attributes":[{"key":"service.name","value":{"stringValue":"'$service'"}}]}'
 scope='{"name":"o11y-check"}'
 
-post /v1/traces '{"resourceSpans":[{"resource":'"$resource"',"scopeSpans":[{"scope":'"$scope"',"spans":[{"traceId":"'"$trace_id"'","spanId":"'"$span_id"'","name":"o11y-check","kind":1,"startTimeUnixNano":"'"$sent"'000000000","endTimeUnixNano":"'"$sent"'500000000"}]}]}]}'
-post /v1/logs '{"resourceLogs":[{"resource":'"$resource"',"scopeLogs":[{"scope":'"$scope"',"logRecords":[{"timeUnixNano":"'"$sent"'000000000","severityText":"INFO","body":{"stringValue":"o11y-check '"$run_id"'"}}]}]}]}'
-post /v1/metrics '{"resourceMetrics":[{"resource":'"$resource"',"scopeMetrics":[{"scope":'"$scope"',"metrics":[{"name":"o11y_check_value","gauge":{"dataPoints":[{"asInt":"'"$value"'","timeUnixNano":"'"$sent"'000000000","attributes":[{"key":"run_id","value":{"stringValue":"'"$run_id"'"}}]}]}}]}]}]}'
+! wanted traces || post /v1/traces '{"resourceSpans":[{"resource":'"$resource"',"scopeSpans":[{"scope":'"$scope"',"spans":[{"traceId":"'"$trace_id"'","spanId":"'"$span_id"'","name":"o11y-check","kind":1,"startTimeUnixNano":"'"$sent"'000000000","endTimeUnixNano":"'"$sent"'500000000"}]}]}]}'
+! wanted logs || post /v1/logs '{"resourceLogs":[{"resource":'"$resource"',"scopeLogs":[{"scope":'"$scope"',"logRecords":[{"timeUnixNano":"'"$sent"'000000000","severityText":"INFO","body":{"stringValue":"o11y-check '"$run_id"'"}}]}]}]}'
+! wanted metrics || post /v1/metrics '{"resourceMetrics":[{"resource":'"$resource"',"scopeMetrics":[{"scope":'"$scope"',"metrics":[{"name":"o11y_check_value","gauge":{"dataPoints":[{"asInt":"'"$value"'","timeUnixNano":"'"$sent"'000000000","attributes":[{"key":"run_id","value":{"stringValue":"'"$run_id"'"}}]}]}}]}]}]}'
 
-poll 60 trace_found || die "trace $trace_id was not returned by Tempo"
-echo "ok receipt: trace $trace_id found in Tempo with service $service"
-poll 60 log_found "$((sent - 60))" || die "Loki did not return exactly the one log line of run $run_id"
-echo "ok receipt: exactly one log line with the run's body found in Loki"
-poll 60 metric_fresh || die "Mimir did not return one fresh sample equal to $value for run $run_id"
-echo "ok receipt: one fresh sample equal to $value found in Mimir"
+if wanted traces; then
+  poll 60 trace_found || die "trace $trace_id was not returned by Tempo"
+  echo "ok receipt: trace $trace_id found in Tempo with service $service"
+fi
+if wanted logs; then
+  poll 60 log_found "$((sent - 60))" || die "Loki did not return exactly the one log line of run $run_id"
+  echo "ok receipt: exactly one log line with the run's body found in Loki"
+fi
+if wanted metrics; then
+  poll 60 metric_fresh || die "Mimir did not return one fresh sample equal to $value for run $run_id"
+  echo "ok receipt: one fresh sample equal to $value found in Mimir"
+fi
 
 if [[ $grpc -eq 1 ]]; then
   grpc_service=o11y-check-grpc-$run_id

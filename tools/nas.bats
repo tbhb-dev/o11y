@@ -165,6 +165,19 @@ exec)
     printf 204
     [ -z "${STUB_FLUSH_THEN_FAILS:-}" ] || exit 255
     ;;
+  *api/v1/query*)
+    # Mimir through Grafana: the five self-scrapes, up, unless
+    # STUB_SELF_DOWN leaves Tempo out.
+    jobs="alloy grafana loki mimir tempo"
+    [ -z "${STUB_SELF_DOWN:-}" ] || jobs="alloy grafana loki mimir"
+    printf '{"status":"success","data":{"result":['
+    sep=
+    for job in $jobs; do
+      printf '%s{"metric":{"job":"o11y/%s","cluster":"o11y","namespace":"o11y"},"value":[0,"1"]}' "$sep" "$job"
+      sep=,
+    done
+    printf ']}}'
+    ;;
   *curl*)
     printf '%s' "${STUB_HTTP:-200}"
     # STUB_HTTP_THEN_FAILS answers, then fails, as a dropped connection can.
@@ -1782,4 +1795,14 @@ wait_for() {
   [ "$status" -eq 0 ]
   [ "$(readlink "$remote/current")" = "releases/$first" ]
   ! recorded "df -Pk" || false
+}
+
+@test "gate-test fails when a self-scrape is not up, and still stops the project" {
+  healthy o11y-gate
+  layout
+  STUB_SELF_DOWN=1 go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL gate-test: up is not 1 for exactly the five o11y/* jobs"* ]] || false
+  recorded "-p o11y-gate --env-file"
+  [ "$(grep -c "down --remove-orphans" "$dir/ssh.log")" -ge 2 ]
 }

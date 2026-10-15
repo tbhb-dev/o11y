@@ -917,6 +917,17 @@ gate_test() {
     die "$task: the stack did not boot and pass the receipt check"
   ok "$task: the stack boots, every service is ready, and the receipt check passes over OTLP/HTTP and gRPC"
 
+  # The five self-scrapes, as smoke checks them: each job up, with the
+  # cluster and namespace labels.
+  rustfs=$(container_of o11y-gate rustfs)
+  self_scraped() {
+    local body
+    body=$(in_network "$rustfs" -s -m 10 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=up%3D%3D1" </dev/null) || return 1
+    [[ $(jq -c '[.data.result[].metric | select(.namespace == "o11y" and (.cluster // "") != "") | .job] | sort' <<<"$body" 2>/dev/null) == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
+  }
+  poll "$timeout" self_scraped || die "$task: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
+  ok "$task: up is 1 for exactly the five o11y/* jobs, each labelled"
+
   [[ $(remote "$(util_cmd "$data" "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*")") == "$gate_layout" ]] ||
     die "$task: owners, modes or sizes under the gate data directory differ from the layout"
   ok "$task: the data directories and the four secret files have the expected owners, modes and sizes"
@@ -930,7 +941,6 @@ gate_test() {
   # at v3.1.0), so a lookup limited to stored blocks proves nothing and
   # emptying its local state could race the upload, and
   # Mimir answers a query this fresh from its ingester.
-  rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
     count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$diagnostics_log" | tr -d '\r') || return 1

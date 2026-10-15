@@ -316,13 +316,69 @@ for service in tempo mimir; do
 done
 ok "6: the three buckets hold objects, Loki returns the receipt from the bucket alone, Tempo and Mimir keep it across a restart"
 
-# 7. Self-monitoring.
-all_up() {
-  [[ $(curl -s -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=up%3D%3D1" |
-    jq -c '[.data.result[].metric.job] | sort') == '["alloy","grafana","loki","mimir","tempo"]' ]]
+# 7. Self-monitoring. Each service is its own scrape job, o11y/<name>, with
+# the cluster and namespace labels, and stays below the sample_limit that
+# config.alloy gives it.
+jobs=(alloy grafana loki mimir tempo)
+mimir_query() {
+  curl -s -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$1" '$v | @uri')"
 }
-poll 180 all_up || die "7: up is not 1 for the five scraped jobs"
-ok "7: up is 1 for alloy, grafana, loki, mimir and tempo"
+all_up() {
+  [[ $(mimir_query 'up == 1' | jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort') == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
+}
+poll 180 all_up || die "7: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
+# One "job limit" line per scrape block.
+limits=$(awk -F'"' '/"job" = / { job = $8 } /^\tsample_limit / { sub(/.*= */, ""); print job, $0 }' config/alloy/config.alloy)
+[[ $(wc -l <<<"$limits") -eq 5 ]] || die "7: config.alloy does not give each of the five scrapes a sample_limit"
+while read -r job limit; do
+  mimir_query "scrape_samples_post_metric_relabeling{job=\"$job\"} < $limit" | jq -e '.data.result | length == 1' >/dev/null ||
+    die "7: $job is not below its sample_limit of $limit"
+done <<<"$limits"
+ok "7: up is 1 for exactly the five o11y/* jobs, each labelled and below its sample_limit"
+
+# A dashboard panel's query, as Grafana provisioned it, run as the instant
+# query the panel makes. Prints the values it returns, and fails when Mimir
+# does not answer.
+panel_query() {
+  local expr
+  expr=$(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" |
+    jq -er --arg t "$1" '.dashboard.panels[] | select(.title == $t) | .targets[0] | select(.instant == true) | .expr') || return 1
+  # shellcheck disable=SC2016 # the dashboard's own variable, replaced as text
+  mimir_query "${expr//'$__rate_interval'/2m}" | jq -ce 'select(.status == "success") | [.data.result[].value[1]]'
+}
+# A failed scrape writes a fresh up of 0, so Tempo stopped reads Down, with
+# a recent last scrape. Its refused-spans counter exists since step 5, and a
+# rate over its samples from before the stop would still read zero errors,
+# so the panel must show nothing at all.
+[[ $(mimir_query 'tempo_receiver_refused_spans{job="o11y/tempo"}' | jq '.data.result | length') -ge 1 ]] ||
+  die "7: Tempo's refused-spans counter does not exist yet, so the check below would prove nothing"
+tempo_failed() {
+  [[ $(panel_query "Up: o11y/tempo") == '["0"]' ]] &&
+    panel_query "Last scrape: o11y/tempo" | jq -e 'length == 1 and (.[0] | tonumber) < 90' >/dev/null &&
+    [[ $(panel_query "Restarts in 1h: o11y/tempo") == '[]' ]] &&
+    [[ $(panel_query "Tempo refused and discarded spans") == '[]' ]]
+}
+main stop tempo >/dev/null 2>&1 || die "7: tempo could not be stopped"
+poll 120 tempo_failed || die "7: with Tempo stopped, a panel does not show it down or unavailable"
+main start tempo >/dev/null 2>&1 || die "7: tempo could not be started again"
+wait_ready tempo
+# With Alloy stopped and Mimir still answering, nothing new is written, the
+# last samples age, and every status panel must turn Unavailable or Stale.
+stale() {
+  local job
+  for job in "${jobs[@]}"; do
+    [[ $(panel_query "Up: o11y/$job") == '[]' ]] || return 1
+    panel_query "Last scrape: o11y/$job" | jq -e 'length == 0 or (.[0] | tonumber) >= 90' >/dev/null || return 1
+    [[ $(panel_query "Restarts in 1h: o11y/$job") == '[]' ]] || return 1
+  done
+  [[ $(panel_query "Alloy client receiver refusals") == '[]' ]]
+}
+main stop alloy >/dev/null 2>&1 || die "7: alloy could not be stopped"
+poll 180 stale || die "7: with Alloy stopped, a panel still shows a job as up or its errors as zero"
+main start alloy >/dev/null 2>&1 || die "7: alloy could not be started again"
+wait_ready alloy
+poll 180 all_up || die "7: the five jobs are not up again once Tempo and Alloy are back"
+ok "7: a stopped Tempo reads Down with no error count, and a stopped Alloy turns every status panel Unavailable or Stale"
 
 # 8. A release only recreates what changed. The same tree rendered again
 # must leave every container alone. One changed byte in Loki's config must
