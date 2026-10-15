@@ -43,6 +43,9 @@
 #   O11Y_GRAFANA_PORT, O11Y_OTLP_GRPC_PORT, O11Y_OTLP_HTTP_PORT
 #                          loopback ports on the host (3000, 4317, 4318)
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
+#   O11Y_DISK_RESERVE_GB   free space preflight, gate-test and deploy require
+#                          under O11Y_REMOTE_DIR, in GiB (50), on top of 10
+#                          percent of the filesystem
 #
 # Output is variable names, release ids and pass or fail lines. Everything
 # a task prints goes to tmp/deploy/<task>.log, and the remote diagnostics it
@@ -66,6 +69,7 @@ task=${1:-}
 services=(rustfs loki tempo mimir alloy grafana)
 id_re='^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{4,40}$'
 timeout=${O11Y_HEALTH_TIMEOUT:-300}
+reserve_gb=${O11Y_DISK_RESERVE_GB:-50}
 dir=${O11Y_REMOTE_DIR:-}
 docker="sudo -n ${O11Y_REMOTE_DOCKER:-}"
 tailscale=${O11Y_REMOTE_TAILSCALE:-}
@@ -78,6 +82,8 @@ locked=0
 gate_release=
 swap_pending=
 model=
+free_kb=
+total_kb=
 
 # --- validation -----------------------------------------------------------
 
@@ -109,6 +115,9 @@ need() {
     tailscale) need_path O11Y_REMOTE_TAILSCALE ;;
     domain)
       [[ ${O11Y_TAILNET_DOMAIN:-} =~ ^$label(\.$label)+$ ]] || die "$task: O11Y_TAILNET_DOMAIN must be a DNS name"
+      ;;
+    reserve)
+      [[ $reserve_gb =~ ^[0-9]{1,6}$ ]] || die "$task: O11Y_DISK_RESERVE_GB must be a whole number of GiB"
       ;;
     ports)
       need_port O11Y_GRAFANA_PORT "$grafana_port"
@@ -547,6 +556,39 @@ fs_type_cmd() {
   echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; t=\$(df -PT \"\$d\" 2>/dev/null | awk 'NR == 2 { print \$2 }'); case \$t in '' | -) t=\$(stat -f -c %T \"\$d\" 2>/dev/null) ;; esac; echo \"\${t:-unknown}\""
 }
 
+# disk_cmd: kilobytes available and in total on the filesystem under
+# O11Y_REMOTE_DIR, or under its nearest existing ancestor before the first
+# stage.
+disk_cmd() {
+  echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4, \$2 }'"
+}
+
+# disk_space: sets free_kb and total_kb, or fails.
+disk_space() {
+  local out
+  out=$(remote "$(disk_cmd)") || return 1
+  read -r free_kb total_kb <<<"$out"
+  [[ $free_kb =~ ^[0-9]+$ && $total_kb =~ ^[1-9][0-9]*$ ]]
+}
+
+# disk_summary: free space in GiB and as a percentage of the filesystem.
+disk_summary() {
+  echo "$((free_kb / 1048576)) GiB free of $((total_kb / 1048576)) GiB ($((free_kb * 100 / total_kb)) percent)"
+}
+
+# disk_gate: refuses to go on with less than the reserve free, or less than
+# 10 percent of the filesystem. It runs once the task holds the lock, if it
+# takes one, so a refusal goes through the ordinary cleanup and frees it.
+# Rollback never calls it: going back to the last release that passed must
+# work on a full disk too.
+disk_gate() {
+  disk_space || die "$task: the host could not be asked for its free space under O11Y_REMOTE_DIR"
+  if ((free_kb < reserve_gb * 1048576 || free_kb * 10 < total_kb)); then
+    die "$task: the filesystem under O11Y_REMOTE_DIR has $(disk_summary), below the reserve of $reserve_gb GiB and 10 percent. Nothing was started"
+  fi
+  ok "$task: the filesystem under O11Y_REMOTE_DIR has $(disk_summary), above the reserve of $reserve_gb GiB and 10 percent"
+}
+
 # --- tasks ----------------------------------------------------------------
 
 preflight() {
@@ -579,11 +621,10 @@ preflight() {
     "sha256sum --version >/dev/null && mv --help 2>&1 | grep -q -- -T"
   fact noted "listeners on the stack's ports (none before the first deploy)" lines \
     "netstat -ltn | grep -E $(q ":($grafana_port|$grpc_port|$http_port) ") || true"
-  fact noted "kilobytes free where O11Y_REMOTE_DIR will live" text \
-    "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4 }'"
   fact noted "filesystem where O11Y_REMOTE_DIR will live" text "$(fs_type_cmd)"
   fact noted "existing containers" lines "$docker ps -a --format $(q '{{.Names}} {{.Image}} {{.Status}}')"
   [[ $failed -eq 0 ]] || die "$task: a required fact does not hold"
+  disk_gate
 }
 
 deploy_plan() {
@@ -632,6 +673,7 @@ deploy_plan() {
 
 deploy() {
   local id current
+  disk_gate
   id=$(staged)
   if [[ -z $id ]] || ! quiet remote "$(verify_cmd "$dir/releases/$id")"; then
     stage
@@ -710,6 +752,11 @@ status() {
     # other container on the host.
     remote "ids=\$($docker ps -q $(of_project o11y)) || exit 1; if [ -n \"\$ids\" ]; then $docker stats --no-stream --format $(q 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}') \$ids; else echo 'no running containers to measure'; fi" ||
       echo "container statistics are unavailable"
+  fi
+  if disk_space; then
+    echo "disk under O11Y_REMOTE_DIR: $(disk_summary)"
+  else
+    echo "free space under O11Y_REMOTE_DIR is unavailable"
   fi
   shown "$tailscale serve status" || echo "serve status is unavailable"
 }
@@ -816,6 +863,7 @@ s3probe /usr/local/bin/aws --version"
 
 gate_test() {
   local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code
+  disk_gate
   id=$(new_release_id)
   out=tmp/deploy/gate-$id
   release=$dir/gate/releases/$id
@@ -1008,10 +1056,12 @@ deploy-plan | grafana-password) ;;
 esac
 
 case $task in
-preflight) need host dir docker compose tailscale ports ;;
+preflight) need host dir docker compose tailscale ports reserve ;;
 deploy-plan) need dir docker compose domain ports ;;
-stage | deploy) need host dir docker compose domain ports ;;
-gate-test | gate-clean | rollback | down | logs) need host dir docker compose ;;
+stage) need host dir docker compose domain ports ;;
+deploy) need host dir docker compose domain ports reserve ;;
+gate-test) need host dir docker compose reserve ;;
+gate-clean | rollback | down | logs) need host dir docker compose ;;
 status) need host dir docker tailscale ;;
 serve-apply) need host tailscale ports ;;
 serve-status | serve-clear) need host tailscale ;;

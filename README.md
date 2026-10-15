@@ -14,6 +14,8 @@ Two more checks need a Docker engine. `mise run validate` loads the Compose mode
 
 One host runs the stack, reached over SSH. Copy `mise.local.toml.example` to `mise.local.toml`, which git ignores, and set the `O11Y_*` values that the header of `tools/nas.sh` lists. Each task that changes the host refuses to run unless `O11Y_CONFIRM` names it, as in `O11Y_CONFIRM=stage mise run stage`. Those that change the stack or its directory also take a lock on the host, so only one of them runs at a time.
 
+`preflight`, `gate-test` and `deploy` refuse to start when the filesystem under `$O11Y_REMOTE_DIR` has less than `O11Y_DISK_RESERVE_GB` free (50 GiB unless set) or less than 10 percent free, and `status` prints the free space. `rollback` skips that check, so going back to the last release that passed works on a full disk too.
+
 A first deploy runs these tasks in order:
 
 1. `preflight` reads facts off the host without changing anything there.
