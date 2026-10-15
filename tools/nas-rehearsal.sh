@@ -60,8 +60,9 @@ if [[ ${1:-} != --inside ]]; then
   trap remove_scratch EXIT
   mkdir -p "$base_dir"
   git archive "$base_commit" | tar -x -C "$base_dir"
+  head_commit=$(git rev-parse --short HEAD)
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$scratch:$scratch" -v "$root:/src:ro" -v "$base_dir:/base:ro" \
-    -e "REHEARSAL_COMMIT=$(git rev-parse --short HEAD)" -e "REHEARSAL_BASE_COMMIT=$base_commit" "$cli_image" \
+    -e "REHEARSAL_COMMIT=$head_commit" -e "REHEARSAL_BASE_COMMIT=$base_commit" "$cli_image" \
     sh -c 'apk add --no-cache bash coreutils curl findutils jq tar >/dev/null && exec bash /src/tools/nas-rehearsal.sh --inside'
   [[ -z $(leftovers) ]] || die "the rehearsal left a container, network or volume behind"
   ok "rehearsal: nothing of projects o11y and o11y-gate is left on the engine"
@@ -198,15 +199,16 @@ on_base() {
 # running Grafana provisioned it, run as the instant query the panel makes.
 # The test applies to the sorted job and value of every series they return.
 up_panels() {
-  local rustfs dashboard exprs expr body results=()
-  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
+  local rustfs dashboard exprs expr query body results=()
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs) || return 1
   [[ -n $rustfs ]] || return 1
   # Each request's output is kept only once the request has succeeded.
   dashboard=$(docker exec "$rustfs" curl -fsS -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health) || return 1
   exprs=$(jq -er '.dashboard.panels[] | select(.title == "Up" or (.title | startswith("Up: "))) | .targets[] | select(.instant == true) | .expr' <<<"$dashboard") || return 1
   while IFS= read -r expr; do
+    query=$(jq -rn --arg v "$expr" '$v | @uri') || return 1
     body=$(docker exec "$rustfs" curl -fsS -m 15 \
-      "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$expr" '$v | @uri')") || return 1
+      "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query") || return 1
     body=$(jq -ce 'select(.status == "success") | [.data.result[] | [.metric.job, .value[1]]]' <<<"$body") || return 1
     results+=("$body")
   done <<<"$exprs"
@@ -219,10 +221,11 @@ up_panels() {
 # while the panels are read, it fails an Up panel that keeps the freshness
 # filter but loses its job selector.
 seed() {
-  local rustfs
-  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
+  local rustfs now
+  now=$(date +%s) || return 1
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs) || return 1
   [[ -n $rustfs ]] || return 1
-  printf '%s' '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"rehearsal-seed"}},{"key":"service.namespace","value":{"stringValue":"o11y"}}]},"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"'"$(date +%s)"'000000000"}]}}]}]}]}' |
+  printf '%s' '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"rehearsal-seed"}},{"key":"service.namespace","value":{"stringValue":"o11y"}}]},"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"'"$now"'000000000"}]}}]}]}]}' |
     docker exec -i "$rustfs" curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Content-Type: application/json' \
       --data-binary @- http://alloy:4318/v1/metrics | grep -qx 200
 }
@@ -231,8 +234,8 @@ seed() {
 # something.
 seeded() {
   local rustfs query body
-  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
-  query=$(jq -rn '"up{job=\"o11y/rehearsal-seed\"} and time() - timestamp(up{job=\"o11y/rehearsal-seed\"}) < 90" | @uri')
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs) || return 1
+  query=$(jq -rn '"up{job=\"o11y/rehearsal-seed\"} and time() - timestamp(up{job=\"o11y/rehearsal-seed\"}) < 90" | @uri') || return 1
   [[ -n $rustfs ]] || return 1
   body=$(docker exec "$rustfs" curl -fsS -m 15 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query") || return 1
   jq -e '.data.result | length == 1' <<<"$body" >/dev/null
@@ -246,7 +249,8 @@ on_base "preflight failed" preflight
 on_base "stage failed" stage
 first=releases/$(cat "$base_work/tmp/deploy/staged")
 on_base "the first deploy failed" deploy
-[[ $(pointer current) == "$first" && ! -e $remote/previous ]] || die "rehearsal: the first deploy did not make the base release current"
+current=$(pointer current) || die "rehearsal: the current pointer could not be read"
+[[ $current == "$first" && ! -e $remote/previous ]] || die "rehearsal: the first deploy did not make the base release current"
 ok "rehearsal: the first deploy, of the base, is current"
 
 status=$(step "status failed" status)

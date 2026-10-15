@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# The fault run's memory verdict against made-up peaks files. The run itself
+# The fault run's memory verdict against made-up peaks files, and its load
+# generator verdict against made-up inspect results. The run itself
 # needs a Linux engine and takes minutes, so only its last check runs here.
 
 setup() {
@@ -53,5 +54,18 @@ six() {
     echo "tempo 768M"
   } >"$peaks"
   run bash "$script" --check-peaks "$peaks"
+  [ "$status" -ne 0 ]
+}
+
+@test "a load generator passes only when its inspect succeeded and it runs or exited 0" {
+  run bash "$script" --check-load 0 "running 0"
+  [ "$status" -eq 0 ]
+  run bash "$script" --check-load 0 "exited 0"
+  [ "$status" -eq 0 ]
+  run bash "$script" --check-load 0 "exited 1"
+  [ "$status" -ne 0 ]
+  run bash "$script" --check-load 1 ""
+  [ "$status" -ne 0 ]
+  run bash "$script" --check-load 1 "running 0"
   [ "$status" -ne 0 ]
 }

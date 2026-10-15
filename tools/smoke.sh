@@ -260,12 +260,22 @@ printf 'user = "admin:%s"\n' admin | expect_status 403 -K - "$grafana/api/admin/
   die "4: the provisioned datasources are not the expected three"
 [[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
   die "4: the provisioned dashboard is missing"
+# The call deploy makes on every run (home_cmd in tools/nas.sh), until the
+# Grafana pin has the fix for grafana/grafana#131876.
+[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - -X PUT -H 'Content-Type: application/json' \
+  -d '{"homeDashboardUID":"o11y-stack-health"}' "$grafana/api/org/preferences") == 200 ]] ||
+  die "4: the home dashboard could not be set"
+[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | curl -s -m 15 -K - "$grafana/api/org/preferences" | jq -r '.homeDashboardUID') == o11y-stack-health ]] ||
+  die "4: the org preferences do not name the provisioned dashboard as home"
+# An anonymous user gets the org preferences, so its home is that dashboard.
+[[ $(curl -s -m 15 "$grafana/api/dashboards/home" | jq -r '.redirectUri') == /d/o11y-stack-health/* ]] ||
+  die "4: the anonymous home is not the provisioned dashboard"
 main logs --no-log-prefix grafana >"$out/grafana.log" 2>&1 || die "4: the Grafana log could not be read"
 # A log without provisioning lines would pass the error check vacuously.
 grep -qi 'provisioning' "$out/grafana.log" || die "4: the Grafana log shows no provisioning at all"
 ! grep -i 'provisioning' "$out/grafana.log" | grep -qiE 'level=(error|warn)' ||
   die "4: the Grafana log has a provisioning error"
-ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, provisioning is clean"
+ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, the home dashboard is set, provisioning is clean"
 
 # 5. Exact receipt of one trace, log and metric over OTLP/HTTP, plus one
 # trace over gRPC. Both go through the published ports. A container reaches
@@ -322,15 +332,21 @@ ok "6: the three buckets hold objects, Loki returns the receipt from the bucket 
 # config.alloy gives it.
 jobs=(alloy grafana loki mimir tempo)
 mimir_query() {
-  curl -fsS -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$1" '$v | @uri')"
+  local query
+  query=$(jq -rn --arg v "$1" '$v | @uri') || return 1
+  curl -fsS -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$query"
 }
 all_up() {
-  [[ $(mimir_query 'up == 1' | jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort') == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
+  local body jobs
+  body=$(mimir_query 'up == 1') || return 1
+  jobs=$(jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort' <<<"$body") || return 1
+  [[ $jobs == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
 }
 poll 180 all_up || die "7: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
 # One "job limit" line per scrape block.
 limits=$(awk -F'"' '/"job" = / { job = $8 } /^\tsample_limit / { sub(/.*= */, ""); print job, $0 }' config/alloy/config.alloy)
-[[ $(wc -l <<<"$limits") -eq 5 ]] || die "7: config.alloy does not give each of the five scrapes a sample_limit"
+scrapes=$(wc -l <<<"$limits")
+[[ $scrapes -eq 5 ]] || die "7: config.alloy does not give each of the five scrapes a sample_limit"
 while read -r job limit; do
   mimir_query "scrape_samples_post_metric_relabeling{job=\"$job\"} < $limit" | jq -e '.data.result | length == 1' >/dev/null ||
     die "7: $job is not below its sample_limit of $limit"
