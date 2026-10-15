@@ -154,10 +154,22 @@ esac
 exit 0
 STUB
   # `config` without -q prints the env file a model loads, as the real one
-  # does.
+  # does. The host's dockerd refuses to create a missing bind mount source,
+  # so a run or up whose data or config directory is missing fails.
   stub "$host/bin/docker-compose" <<'STUB'
 all="$*"
 case $all in *"${STUB_FAIL:-no failure}"*) exit 1 ;; esac
+case " $all " in
+*" run "* | *" up "*)
+  env_file=${all#*--env-file }
+  for source in $(grep -E '^O11Y_(DATA_DIR|CONFIG_[A-Z]+)=' "${env_file%% *}" | cut -d= -f2-); do
+    [ -e "$source" ] || {
+      echo "Error response from daemon: Bind mount failed: '$source' does not exist" >&2
+      exit 1
+    }
+  done
+  ;;
+esac
 # STUB_FAIL_SECOND fails the second call that matches it.
 case $all in
 *"${STUB_FAIL_SECOND:-no failure}"*)
@@ -204,8 +216,11 @@ echo "receipt.sh $* [curl=$O11Y_CHECK_CURL otlp=$O11Y_CHECK_OTLP_URL grafana=$O1
 [ -z "${STUB_RECEIPT_FAIL:-}" ] || exit 1
 [ "${1:-}" != --state-file ] || echo "0123456789abcdef 0123456789abcdef0123456789abcdef 42 1760000000" >"$2"
 STUB
+  # The probe starts with init, which the host refuses while the release's
+  # data directory is missing.
   stub "$repo/tools/rustfs-probe.sh" <<'STUB'
 echo "rustfs-probe.sh $*" >>"$STUB/tools.log"
+[ -d "$(grep '^O11Y_DATA_DIR=' "$2/.env" | cut -d= -f2-)" ] || exit 1
 [ -z "${STUB_PROBE_FAIL:-}" ]
 STUB
 
@@ -478,6 +493,35 @@ everything() {
   done
 }
 
+@test "a first deploy creates the data directory as the SSH user before init mounts it" {
+  healthy o11y
+  [ ! -e "$remote/data" ]
+  go deploy
+  [ "$status" -eq 0 ]
+  id=$(staged)
+  in_order "echo $id >$remote/attempt.new" "mkdir -p -m 755 $remote/data" "-f $remote/releases/$id/compose.init.yaml run --rm -T init"
+  [[ $(grep -F "mkdir -p -m 755 $remote/data" "$dir/ssh.log") != *sudo* ]] || false
+  [ -d "$remote/data" ]
+}
+
+@test "a later deploy leaves an existing data directory as it is" {
+  healthy o11y
+  mkdir -p "$remote/data/secrets"
+  chmod 700 "$remote/data"
+  go deploy
+  [ "$status" -eq 0 ]
+  [ -d "$remote/data/secrets" ]
+  [ -n "$(find "$remote/data" -maxdepth 0 -perm 700)" ]
+}
+
+@test "deploy stops before init when the data directory can't be created" {
+  healthy o11y
+  STUB_SSH_FAIL_ON="mkdir -p -m 755 $remote/data" go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"the data directory could not be created"* ]]
+  ! recorded " run --rm -T init" || false
+}
+
 @test "deploy uses the release stage produced and uploads nothing again" {
   healthy o11y
   go stage
@@ -695,6 +739,25 @@ everything() {
   [[ $output == *"gate-clean"* ]]
   ! recorded " up " || false
   ! recorded " run " || false
+}
+
+@test "gate-test checks that the gate data directory is absent, then creates it before the probe's init" {
+  healthy o11y-gate
+  layout
+  go gate-test
+  [ "$status" -eq 0 ]
+  in_order "test ! -e $remote/gate/data" "mkdir -m 755 $remote/gate/data"
+  [[ $(grep -F "mkdir -m 755 $remote/gate/data" "$dir/ssh.log") != *sudo* ]] || false
+  grep -qF "rustfs-probe.sh --release" "$dir/tools.log"
+}
+
+@test "gate-test stops before the probe when the gate data directory can't be created" {
+  healthy o11y-gate
+  layout
+  STUB_SSH_FAIL_ON="mkdir -m 755 $remote/gate/data" go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"the gate data directory could not be created"* ]]
+  [ ! -f "$dir/tools.log" ]
 }
 
 @test "gate-test fails when the layout under the gate data directory differs" {

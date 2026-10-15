@@ -521,6 +521,14 @@ health_gate() {
   }
 }
 
+# The host's dockerd refuses to create a missing bind mount source, so the
+# data directory init mounts is made first, as the SSH user. Init sets the
+# owners and modes of what it creates inside, and a directory that exists
+# is left as it is.
+data_cmd() {
+  echo "mkdir -p -m 755 $dir/data"
+}
+
 up_cmd() {
   echo "$(compose_cmd o11y "$dir/releases/$1" .env compose.yaml) up -d --remove-orphans"
 }
@@ -596,6 +604,7 @@ deploy_plan() {
     lock_cmd
     verify_cmd "$dir/releases/$id"
     attempt_cmd "$id"
+    data_cmd
     echo "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init"
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
@@ -615,6 +624,7 @@ deploy() {
   fi
   current=$(promoted current)
   quiet remote "$(attempt_cmd "$id")" || die "$task: the attempt could not be recorded"
+  quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
@@ -826,6 +836,9 @@ gate_test() {
   done <<<"$gate_binaries"
   ok "$task: the binary of each of the eight images runs on the host's kernel"
 
+  # Made only now, after the check above and right before the probe's init
+  # first mounts it. See data_cmd.
+  quiet remote "mkdir -m 755 $data" || die "$task: the gate data directory could not be created"
   if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null; then
     if remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) logs --no-color --no-log-prefix rustfs" 2>&1 |
       grep -qi 'unsupported filesystem'; then
