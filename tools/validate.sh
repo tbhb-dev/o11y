@@ -167,7 +167,8 @@ bounded() {
     END { exit !(scrapes > 0 && !bad && writes == 1 && queue && wal) }' "$1"
 }
 
-if bounded "$(config_dir ALLOY)/config.alloy"; then
+alloy_dir=$(config_dir ALLOY)
+if bounded "$alloy_dir/config.alloy"; then
   ok "alloy: every scrape has its sample, label and body limits, and the remote write a queue and a WAL bound"
 else
   echo "FAIL alloy: a scrape lacks a limit, or the remote write lacks queue_config or wal" >&2

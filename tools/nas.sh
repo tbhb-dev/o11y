@@ -566,8 +566,9 @@ disk_cmd() {
 
 # disk_space: sets free_kb and total_kb, or fails.
 disk_space() {
-  local out
-  out=$(remote "$(disk_cmd)") || return 1
+  local cmd out
+  cmd=$(disk_cmd)
+  out=$(remote "$cmd") || return 1
   read -r free_kb total_kb <<<"$out"
   [[ $free_kb =~ ^[0-9]+$ && $total_kb =~ ^[1-9][0-9]*$ ]]
 }
@@ -583,11 +584,13 @@ disk_summary() {
 # Rollback never calls it: going back to the last release that passed must
 # work on a full disk too.
 disk_gate() {
+  local summary
   disk_space || die "$task: the host could not be asked for its free space under O11Y_REMOTE_DIR"
+  summary=$(disk_summary)
   if ((free_kb < reserve_gb * 1048576 || free_kb * 10 < total_kb)); then
-    die "$task: the filesystem under O11Y_REMOTE_DIR has $(disk_summary), below the reserve of $reserve_gb GiB and 10 percent. Nothing was started"
+    die "$task: the filesystem under O11Y_REMOTE_DIR has $summary, below the reserve of $reserve_gb GiB and 10 percent. Nothing was started"
   fi
-  ok "$task: the filesystem under O11Y_REMOTE_DIR has $(disk_summary), above the reserve of $reserve_gb GiB and 10 percent"
+  ok "$task: the filesystem under O11Y_REMOTE_DIR has $summary, above the reserve of $reserve_gb GiB and 10 percent"
 }
 
 # --- tasks ----------------------------------------------------------------
@@ -732,7 +735,7 @@ down() {
 }
 
 status() {
-  local id listing rustfs service
+  local id listing rustfs service summary
   id=$(promoted current)
   echo "current release: ${id:-none}"
   listing=$(containers o11y) || die "$task: the host could not be asked for its containers"
@@ -755,7 +758,8 @@ status() {
       echo "container statistics are unavailable"
   fi
   if disk_space; then
-    echo "disk under O11Y_REMOTE_DIR: $(disk_summary)"
+    summary=$(disk_summary)
+    echo "disk under O11Y_REMOTE_DIR: $summary"
   else
     echo "free space under O11Y_REMOTE_DIR is unavailable"
   fi
@@ -922,9 +926,10 @@ gate_test() {
   # cluster and namespace labels.
   rustfs=$(container_of o11y-gate rustfs)
   self_scraped() {
-    local body
+    local body jobs
     body=$(in_network "$rustfs" -s -m 10 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=up%3D%3D1" </dev/null) || return 1
-    [[ $(jq -c '[.data.result[].metric | select(.namespace == "o11y" and (.cluster // "") != "") | .job] | sort' <<<"$body" 2>/dev/null) == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
+    jobs=$(jq -c '[.data.result[].metric | select(.namespace == "o11y" and (.cluster // "") != "") | .job] | sort' <<<"$body" 2>/dev/null) || return 1
+    [[ $jobs == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
   }
   poll "$timeout" self_scraped || die "$task: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
   ok "$task: up is 1 for exactly the five o11y/* jobs, each labelled"

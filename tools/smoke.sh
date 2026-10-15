@@ -321,15 +321,21 @@ ok "6: the three buckets hold objects, Loki returns the receipt from the bucket 
 # config.alloy gives it.
 jobs=(alloy grafana loki mimir tempo)
 mimir_query() {
-  curl -fsS -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$1" '$v | @uri')"
+  local query
+  query=$(jq -rn --arg v "$1" '$v | @uri') || return 1
+  curl -fsS -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$query"
 }
 all_up() {
-  [[ $(mimir_query 'up == 1' | jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort') == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
+  local body jobs
+  body=$(mimir_query 'up == 1') || return 1
+  jobs=$(jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort' <<<"$body") || return 1
+  [[ $jobs == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
 }
 poll 180 all_up || die "7: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
 # One "job limit" line per scrape block.
 limits=$(awk -F'"' '/"job" = / { job = $8 } /^\tsample_limit / { sub(/.*= */, ""); print job, $0 }' config/alloy/config.alloy)
-[[ $(wc -l <<<"$limits") -eq 5 ]] || die "7: config.alloy does not give each of the five scrapes a sample_limit"
+scrapes=$(wc -l <<<"$limits")
+[[ $scrapes -eq 5 ]] || die "7: config.alloy does not give each of the five scrapes a sample_limit"
 while read -r job limit; do
   mimir_query "scrape_samples_post_metric_relabeling{job=\"$job\"} < $limit" | jq -e '.data.result | length == 1' >/dev/null ||
     die "7: $job is not below its sample_limit of $limit"
