@@ -347,10 +347,15 @@ panel_query() {
   mimir_query "${expr//'$__rate_interval'/2m}" | jq -ce 'select(.status == "success") | [.data.result[].value[1]]'
 }
 # A failed scrape writes a fresh up of 0, so Tempo stopped reads Down, with
-# a recent last scrape. Its refused-spans counter exists since step 5, and a
-# rate over its samples from before the stop would still read zero errors,
-# so the panel must show nothing at all.
-[[ $(mimir_query 'tempo_receiver_refused_spans{job="o11y/tempo"}' | jq '.data.result | length') -ge 1 ]] ||
+# a recent last scrape. Its refused-spans counter appears with the first
+# trace a Tempo process receives, so one trace goes in first, and a rate
+# over that counter's samples from before the stop would still read zero
+# errors. The panel must show nothing at all.
+tools/receipt.sh --signals traces >/dev/null || die "7: a trace could not be sent to Tempo"
+refused_counter() {
+  [[ $(mimir_query 'tempo_receiver_refused_spans{job="o11y/tempo"}' | jq '.data.result | length') -ge 1 ]]
+}
+poll 90 refused_counter ||
   die "7: Tempo's refused-spans counter does not exist yet, so the check below would prove nothing"
 tempo_failed() {
   [[ $(panel_query "Up: o11y/tempo") == '["0"]' ]] &&
