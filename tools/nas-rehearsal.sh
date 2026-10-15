@@ -198,15 +198,18 @@ on_base() {
 # running Grafana provisioned it, run as the instant query the panel makes.
 # The test applies to the sorted job and value of every series they return.
 up_panels() {
-  local rustfs expr results=()
+  local rustfs dashboard exprs expr body results=()
   rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
   [[ -n $rustfs ]] || return 1
+  # Each request's output is kept only once the request has succeeded.
+  dashboard=$(docker exec "$rustfs" curl -fsS -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health) || return 1
+  exprs=$(jq -er '.dashboard.panels[] | select(.title == "Up" or (.title | startswith("Up: "))) | .targets[] | select(.instant == true) | .expr' <<<"$dashboard") || return 1
   while IFS= read -r expr; do
-    results+=("$(docker exec "$rustfs" curl -s -m 15 \
-      "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$expr" '$v | @uri')" |
-      jq -ce 'select(.status == "success") | [.data.result[] | [.metric.job, .value[1]]]')") || return 1
-  done < <(docker exec "$rustfs" curl -s -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health |
-    jq -r '.dashboard.panels[] | select(.title == "Up" or (.title | startswith("Up: "))) | .targets[] | select(.instant == true) | .expr')
+    body=$(docker exec "$rustfs" curl -fsS -m 15 \
+      "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$expr" '$v | @uri')") || return 1
+    body=$(jq -ce 'select(.status == "success") | [.data.result[] | [.metric.job, .value[1]]]' <<<"$body") || return 1
+    results+=("$body")
+  done <<<"$exprs"
   ((${#results[@]} > 0)) || return 1
   printf '%s\n' "${results[@]}" | jq -se "add | sort | $1" >/dev/null
 }
@@ -227,11 +230,12 @@ seed() {
 # seeded: the seed series is in Mimir and fresh, so the check above means
 # something.
 seeded() {
-  local rustfs query
+  local rustfs query body
   rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
   query=$(jq -rn '"up{job=\"o11y/rehearsal-seed\"} and time() - timestamp(up{job=\"o11y/rehearsal-seed\"}) < 90" | @uri')
-  docker exec "$rustfs" curl -s -m 15 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query" |
-    jq -e '.data.result | length == 1' >/dev/null
+  [[ -n $rustfs ]] || return 1
+  body=$(docker exec "$rustfs" curl -fsS -m 15 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query") || return 1
+  jq -e '.data.result | length == 1' <<<"$body" >/dev/null
 }
 
 seed_and_read() {

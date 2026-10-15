@@ -321,7 +321,7 @@ ok "6: the three buckets hold objects, Loki returns the receipt from the bucket 
 # config.alloy gives it.
 jobs=(alloy grafana loki mimir tempo)
 mimir_query() {
-  curl -s -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$1" '$v | @uri')"
+  curl -fsS -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$1" '$v | @uri')"
 }
 all_up() {
   [[ $(mimir_query 'up == 1' | jq -c '[.data.result[].metric | select(.cluster == "o11y" and .namespace == "o11y") | .job] | sort') == '["o11y/alloy","o11y/grafana","o11y/loki","o11y/mimir","o11y/tempo"]' ]]
@@ -336,32 +336,37 @@ while read -r job limit; do
 done <<<"$limits"
 ok "7: up is 1 for exactly the five o11y/* jobs, each labelled and below its sample_limit"
 
-# A dashboard panel's query, as Grafana provisioned it, run as the instant
-# query the panel makes. Prints the values it returns, and fails when Mimir
-# does not answer.
+# panel_query <title>: a dashboard panel's query, as Grafana provisioned it,
+# run as the instant query the panel makes. Sets panel to the values it
+# returns, and fails when Grafana or Mimir does not answer, so no caller
+# compares against the output of a failed request.
+panel=
 panel_query() {
-  local expr
-  expr=$(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" |
-    jq -er --arg t "$1" '.dashboard.panels[] | select(.title == $t) | .targets[0] | select(.instant == true) | .expr') || return 1
+  local dashboard expr body
+  dashboard=$(curl -fsS -m 15 "$grafana/api/dashboards/uid/o11y-stack-health") || return 1
+  expr=$(jq -er --arg t "$1" '.dashboard.panels[] | select(.title == $t) | .targets[0] | select(.instant == true) | .expr' <<<"$dashboard") || return 1
   # shellcheck disable=SC2016 # the dashboard's own variable, replaced as text
-  mimir_query "${expr//'$__rate_interval'/2m}" | jq -ce 'select(.status == "success") | [.data.result[].value[1]]'
+  body=$(mimir_query "${expr//'$__rate_interval'/2m}") || return 1
+  panel=$(jq -ce 'select(.status == "success") | [.data.result[].value[1]]' <<<"$body") || return 1
 }
 # A failed scrape writes a fresh up of 0, so Tempo stopped reads Down, with
 # a recent last scrape. Its refused-spans counter appears with the first
-# trace a Tempo process receives, so one trace goes in first, and a rate
-# over that counter's samples from before the stop would still read zero
-# errors. The panel must show nothing at all.
+# trace a Tempo process receives, so one trace goes in first, and the check
+# waits for two samples of it: a rate over those, from before the stop,
+# would still read zero errors. The panel must show nothing at all.
 tools/receipt.sh --signals traces >/dev/null || die "7: a trace could not be sent to Tempo"
 refused_counter() {
-  [[ $(mimir_query 'tempo_receiver_refused_spans{job="o11y/tempo"}' | jq '.data.result | length') -ge 1 ]]
+  local body
+  body=$(mimir_query 'count_over_time(tempo_receiver_refused_spans{job="o11y/tempo"}[2m])') || return 1
+  jq -e '.data.result | length == 1 and (.[0].value[1] | tonumber) >= 2' <<<"$body" >/dev/null
 }
 poll 90 refused_counter ||
   die "7: Tempo's refused-spans counter does not exist yet, so the check below would prove nothing"
 tempo_failed() {
-  [[ $(panel_query "Up: o11y/tempo") == '["0"]' ]] &&
-    panel_query "Last scrape: o11y/tempo" | jq -e 'length == 1 and (.[0] | tonumber) < 90' >/dev/null &&
-    [[ $(panel_query "Restarts in 1h: o11y/tempo") == '[]' ]] &&
-    [[ $(panel_query "Tempo refused and discarded spans") == '[]' ]]
+  panel_query "Up: o11y/tempo" && [[ $panel == '["0"]' ]] &&
+    panel_query "Last scrape: o11y/tempo" && jq -e 'length == 1 and (.[0] | tonumber) < 90' <<<"$panel" >/dev/null &&
+    panel_query "Restarts in 1h: o11y/tempo" && [[ $panel == '[]' ]] &&
+    panel_query "Tempo refused and discarded spans" && [[ $panel == '[]' ]]
 }
 main stop tempo >/dev/null 2>&1 || die "7: tempo could not be stopped"
 poll 120 tempo_failed || die "7: with Tempo stopped, a panel does not show it down or unavailable"
@@ -372,11 +377,11 @@ wait_ready tempo
 stale() {
   local job
   for job in "${jobs[@]}"; do
-    [[ $(panel_query "Up: o11y/$job") == '[]' ]] || return 1
-    panel_query "Last scrape: o11y/$job" | jq -e 'length == 0 or (.[0] | tonumber) >= 90' >/dev/null || return 1
-    [[ $(panel_query "Restarts in 1h: o11y/$job") == '[]' ]] || return 1
+    panel_query "Up: o11y/$job" && [[ $panel == '[]' ]] || return 1
+    panel_query "Last scrape: o11y/$job" && jq -e 'length == 0 or (.[0] | tonumber) >= 90' <<<"$panel" >/dev/null || return 1
+    panel_query "Restarts in 1h: o11y/$job" && [[ $panel == '[]' ]] || return 1
   done
-  [[ $(panel_query "Alloy client receiver refusals") == '[]' ]]
+  panel_query "Alloy client receiver refusals" && [[ $panel == '[]' ]]
 }
 main stop alloy >/dev/null 2>&1 || die "7: alloy could not be stopped"
 poll 180 stale || die "7: with Alloy stopped, a panel still shows a job as up or its errors as zero"
