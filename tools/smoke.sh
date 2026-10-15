@@ -425,11 +425,13 @@ allowlist=$(sed -n '/^otelcol.processor.filter "self"/,/^}/p' config/alloy/confi
 body=$(curl -fsS -m 15 -G --data-urlencode 'match[]={job="o11y/rustfs"}' "$grafana/api/datasources/proxy/uid/mimir/api/v1/series") ||
   die "7: Mimir did not list RustFS's series"
 sent=$(jq -er '.data[].__name__' <<<"$body" | sed -E 's/_(bucket|sum|count)$//' | grep -vx target_info | sort -u)
-[[ -n $sent && -z $(comm -13 <(echo "$allowlist") <(echo "$sent")) ]] || die "7: RustFS sent a metric outside the allowlist"
+extra=$(comm -13 <(echo "$allowlist") <(echo "$sent")) || die "7: the RustFS metric names could not be compared"
+[[ -n $sent && -z $extra ]] || die "7: RustFS sent a metric outside the allowlist"
 body=$(curl -fsS -m 15 -G --data-urlencode 'q={resource.service.name="rustfs"}' "$grafana/api/datasources/proxy/uid/tempo/api/search") ||
   die "7: Tempo did not answer a search for RustFS"
 jq -e '.traces | length == 0' <<<"$body" >/dev/null || die "7: RustFS sent traces"
-body=$(curl -fsS -m 15 -G --data-urlencode 'query={service_name="rustfs"}' --data-urlencode "start=$(($(date +%s) - 3600))000000000" \
+hour_ago=$(($(date +%s) - 3600))
+body=$(curl -fsS -m 15 -G --data-urlencode 'query={service_name="rustfs"}' --data-urlencode "start=${hour_ago}000000000" \
   "$grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range") || die "7: Loki did not answer a query for RustFS"
 jq -e '.data.result | length == 0' <<<"$body" >/dev/null || die "7: RustFS sent logs over OTLP"
 rustfs_log=$(main logs --no-log-prefix rustfs 2>&1) || die "7: RustFS's log could not be read"
