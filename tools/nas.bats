@@ -1789,6 +1789,20 @@ wait_for() {
   [ ! -e "$dir/ssh.log" ]
 }
 
+@test "a df that prints the free space and then fails fails the gate" {
+  healthy o11y
+  stub "$dir/bin/df" <<'STUB'
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 1048576000 0 524288000 50% /"
+exit 1
+STUB
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be asked for its free space"* ]] || false
+  ! recorded "up -d" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
 @test "rollback below the reserve still runs, and checks no free space" {
   two_deploys
   STUB_DISK_FREE=1024 go rollback --previous

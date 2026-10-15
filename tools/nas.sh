@@ -558,9 +558,10 @@ fs_type_cmd() {
 
 # disk_cmd: kilobytes available and in total on the filesystem under
 # O11Y_REMOTE_DIR, or under its nearest existing ancestor before the first
-# stage.
+# stage. df's own status decides, not awk's: a df that prints and then
+# fails must fail the check.
 disk_cmd() {
-  echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4, \$2 }'"
+  echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; out=\$(df -Pk \"\$d\") || exit 1; echo \"\$out\" | awk 'NR == 2 { print \$4, \$2 }'"
 }
 
 # disk_space: sets free_kb and total_kb, or fails.
