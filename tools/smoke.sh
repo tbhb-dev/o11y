@@ -397,23 +397,29 @@ ok "7: a stopped Tempo reads Down with no error count, and a stopped Alloy turns
 # still reach its stdout, which step 2 and the host's gate read, and
 # nothing but JSON log lines follows them: no exporter dump.
 rustfs_pushed() {
-  mimir_query 'rustfs_start_total{job="o11y/rustfs"}' |
-    jq -e '.data.result | length == 1 and (.[0].metric | .instance == "rustfs:9000" and .namespace == "o11y" and .cluster == "o11y")' >/dev/null
+  local body
+  body=$(mimir_query 'rustfs_start_total{job="o11y/rustfs"}') || return 1
+  jq -e '.data.result | length == 1 and (.[0].metric | .instance == "rustfs:9000" and .namespace == "o11y" and .cluster == "o11y")' <<<"$body" >/dev/null
 }
 poll 120 rustfs_pushed || die "7: RustFS's metrics did not arrive as o11y/rustfs with the instance, namespace and cluster labels"
-mimir_query 'target_info{job="o11y/rustfs"}' |
-  jq -e '.data.result | length == 1 and (.[0].metric | .host_name == "smoke-host" and .deployment_environment_name == "smoke" and has("rustfs_node") == false and has("network_local_address") == false)' >/dev/null ||
+body=$(mimir_query 'target_info{job="o11y/rustfs"}') || die "7: Mimir did not answer for RustFS's target_info"
+jq -e '.data.result | length == 1 and (.[0].metric | .host_name == "smoke-host" and .deployment_environment_name == "smoke" and has("rustfs_node") == false and has("network_local_address") == false)' <<<"$body" >/dev/null ||
   die "7: RustFS's resource does not carry the release's host and environment, or still carries its node identity"
 allowlist=$(sed -n '/^otelcol.processor.filter "self"/,/^}/p' config/alloy/config.alloy | grep -oE '"rustfs_[a-z0-9_]+"' | tr -d '"' | sort)
-sent=$(curl -s -m 15 -G --data-urlencode 'match[]={job="o11y/rustfs"}' "$grafana/api/datasources/proxy/uid/mimir/api/v1/series" |
-  jq -r '.data[].__name__' | sed -E 's/_(bucket|sum|count)$//' | grep -vx target_info | sort -u)
+body=$(curl -fsS -m 15 -G --data-urlencode 'match[]={job="o11y/rustfs"}' "$grafana/api/datasources/proxy/uid/mimir/api/v1/series") ||
+  die "7: Mimir did not list RustFS's series"
+sent=$(jq -er '.data[].__name__' <<<"$body" | sed -E 's/_(bucket|sum|count)$//' | grep -vx target_info | sort -u)
 [[ -n $sent && -z $(comm -13 <(echo "$allowlist") <(echo "$sent")) ]] || die "7: RustFS sent a metric outside the allowlist"
-[[ $(curl -s -m 15 -G --data-urlencode 'q={resource.service.name="rustfs"}' "$grafana/api/datasources/proxy/uid/tempo/api/search" | jq '.traces | length') -eq 0 ]] ||
-  die "7: RustFS sent traces"
-[[ $(curl -s -m 15 -G --data-urlencode 'query={service_name="rustfs"}' --data-urlencode "start=$(($(date +%s) - 3600))000000000" \
-  "$grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range" | jq '.data.result | length') -eq 0 ]] || die "7: RustFS sent logs over OTLP"
-main logs --no-log-prefix rustfs 2>&1 | rustfs_log_ok || die "7: RustFS's start lines are no longer on its stdout"
-[[ $(main logs --no-log-prefix rustfs 2>&1 | tr -d '\r' | sed -n '/^Starting: /,$p' | sed 1d | grep -vc '^{') -eq 0 ]] ||
+body=$(curl -fsS -m 15 -G --data-urlencode 'q={resource.service.name="rustfs"}' "$grafana/api/datasources/proxy/uid/tempo/api/search") ||
+  die "7: Tempo did not answer a search for RustFS"
+jq -e '.traces | length == 0' <<<"$body" >/dev/null || die "7: RustFS sent traces"
+body=$(curl -fsS -m 15 -G --data-urlencode 'query={service_name="rustfs"}' --data-urlencode "start=$(($(date +%s) - 3600))000000000" \
+  "$grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range") || die "7: Loki did not answer a query for RustFS"
+jq -e '.data.result | length == 0' <<<"$body" >/dev/null || die "7: RustFS sent logs over OTLP"
+rustfs_log=$(main logs --no-log-prefix rustfs 2>&1) || die "7: RustFS's log could not be read"
+rustfs_log_ok <<<"$rustfs_log" || die "7: RustFS's start lines are no longer on its stdout"
+grep -q '^Starting: ' <<<"$rustfs_log" || die "7: RustFS's log has no entrypoint start line"
+! tr -d '\r' <<<"$rustfs_log" | sed -n '/^Starting: /,$p' | sed 1d | grep -q -v '^{' ||
   die "7: RustFS printed something other than JSON log lines, such as an exporter dump"
 ok "7: RustFS's allowlisted metrics arrive as o11y/rustfs with the stack's identity, no traces or logs, and its stdout keeps the start lines"
 
