@@ -178,6 +178,20 @@ pointer() {
   readlink "$remote/$1"
 }
 
+# up_panel <jq test>: the Stack health dashboard's Up query, as the running
+# Grafana provisioned it, run as the instant query the panel makes, with the
+# test applied to the job and value of each series it returns.
+up_panel() {
+  local rustfs expr
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
+  [[ -n $rustfs ]] || return 1
+  expr=$(docker exec "$rustfs" curl -s -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health |
+    jq -er '.dashboard.panels[] | select(.title == "Up") | .targets[0] | select(.instant == true) | .expr') || return 1
+  docker exec "$rustfs" curl -s -m 15 \
+    "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$expr" '$v | @uri')" |
+    jq -e ".status == \"success\" and ([.data.result[] | [.metric.job, .value[1]]] | sort | $1)" >/dev/null
+}
+
 step "preflight failed" preflight
 step "stage failed" stage
 first=releases/$(cat tmp/deploy/staged)
@@ -204,6 +218,17 @@ step "rollback --previous failed" rollback --previous
 grep -q "(release ${first#releases/}) Up" <<<"$(bash tools/nas.sh status)" ||
   die "rehearsal: after rollback --previous the containers do not run the first release"
 ok "rehearsal: rollback --previous runs the first release again"
+# Series another release wrote under other job names are still in Mimir
+# after a rollback, and must not reach the panel. With Alloy stopped and
+# Mimir still answering, the last samples age, and the panel must drop them
+# rather than show the jobs as up.
+five_up='. == [["alloy", "1"], ["grafana", "1"], ["loki", "1"], ["mimir", "1"], ["tempo", "1"]]'
+poll 180 up_panel "$five_up" || die "rehearsal: after rollback --previous the dashboard's Up query does not show exactly the five jobs up"
+docker stop "$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+poll 180 up_panel '. == []' || die "rehearsal: with Alloy stopped the dashboard's Up query still returns its last samples"
+docker start "$(docker ps -aq --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+poll 180 up_panel "$five_up" || die "rehearsal: once Alloy is back the dashboard's Up query does not show the five jobs up"
+ok "rehearsal: after rollback --previous the dashboard's Up query shows exactly the five jobs up, and nothing once their samples are stale"
 
 step "down failed" down
 [[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y) ]] || die "rehearsal: down left containers"
