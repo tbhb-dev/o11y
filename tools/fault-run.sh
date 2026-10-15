@@ -6,6 +6,7 @@
 #
 #   tools/fault-run.sh
 #   tools/fault-run.sh --check-peaks <peaks file>
+#   tools/fault-run.sh --check-load <inspect status> <inspect output>
 #
 # Client load is telemetrygen at 50 items a second per signal through the
 # published ports. During the outage, the receipt check for traces and logs
@@ -18,8 +19,8 @@
 # The record stays in tmp/fault-run/: samples.tsv (raw), checks.log (what
 # each check reported) and summary.txt (peaks per container, and whether
 # anon stayed under 70 percent of its limit). It holds placeholder values
-# only. --check-peaks runs only the last check, on a peaks file, which is
-# how tools/fault-run.bats tests it.
+# only. --check-peaks and --check-load run only the memory verdict or the
+# load generator verdict, which is how tools/fault-run.bats tests them.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -34,10 +35,22 @@ peaks_ok() {
   awk 'NF != 10 || $7 + 0 >= 70 { bad = 1 } END { exit bad || NR != 6 }' "$1"
 }
 
-if [[ ${1:-} == --check-peaks ]]; then
+# load_ok <inspect status> <inspect output>: the inspect of a load generator
+# succeeded, and the generator is running or exited 0.
+load_ok() {
+  [[ $1 -eq 0 && ($2 == "running 0" || $2 == "exited 0") ]]
+}
+
+case ${1:-} in
+--check-peaks)
   peaks_ok "$2"
   exit
-fi
+  ;;
+--check-load)
+  load_ok "$2" "$3"
+  exit
+  ;;
+esac
 
 pin_docker_api
 
@@ -53,10 +66,13 @@ isolate_environment
 O11Y_DATA_DIR=$(test_data_dir fault-run)
 export O11Y_DATA_DIR O11Y_GRAFANA_ROOT_URL=$grafana/
 export O11Y_GRAFANA_PORT=43000 O11Y_OTLP_GRPC_PORT=44317 O11Y_OTLP_HTTP_PORT=44318
-O11Y_SECRETS_OWNER=$(id -u):$(id -g)
+uid=$(id -u)
+gid=$(id -g)
+O11Y_SECRETS_OWNER=$uid:$gid
 export O11Y_SECRETS_OWNER
 
-[[ $(docker info --format '{{.CgroupVersion}}') == 2 ]] || die "the engine does not use cgroup v2, so the raw memory files can't be read; run this on a Linux engine that does"
+cgroup_version=$(docker info --format '{{.CgroupVersion}}') || die "the engine could not be asked for its cgroup version"
+[[ $cgroup_version == 2 ]] || die "the engine does not use cgroup v2, so the raw memory files can't be read; run this on a Linux engine that does"
 
 main() {
   "$O11Y_COMPOSE" -p "$project" --env-file "$release/.env" -f "$release/compose.yaml" "$@"
@@ -67,7 +83,9 @@ inside() {
 }
 
 is_ready() {
-  [[ $(inside "$1") == 200 ]]
+  local code
+  code=$(inside "$1") || return 1
+  [[ $code == 200 ]]
 }
 
 wait_ready() {
@@ -134,7 +152,9 @@ check "the receipt check passes on the healthy stack" receipt traces,logs,metric
 # file, oom and oom_kill from memory.events. Container ids are not secret.
 targets=
 for service in "${services[@]}"; do
-  targets+="$service:$(docker inspect -f '{{.Id}}' "$(main ps -q "$service")") "
+  container=$(main ps -q "$service")
+  id=$(docker inspect -f '{{.Id}}' "$container")
+  targets+="$service:$id "
 done
 # shellcheck disable=SC2016 # the helper's shell expands these
 docker run -d --name "$project-sampler" --cgroupns=host --network none --user 0:0 --entrypoint /bin/sh \
@@ -181,9 +201,9 @@ check "Mimir is back: the receipt check passes for metrics" receipt metrics
 sleep 60
 
 for signal in traces logs metrics; do
-  state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$project-load-$signal") ||
-    die "the $signal load generator could not be inspected"
-  [[ $state == "running 0" || $state == "exited 0" ]] || die "the $signal load generator failed ($state)"
+  status=0
+  state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$project-load-$signal") || status=$?
+  load_ok "$status" "$state" || die "the $signal load generator failed or could not be inspected (${state:-no state})"
 done
 docker logs "$project-sampler" >"$out/samples.tsv" 2>&1
 docker rm -f "$project-sampler" >/dev/null
@@ -191,7 +211,9 @@ docker rm -f "$project-sampler" >/dev/null
 flags() {
   local service
   for service in "${services[@]}"; do
-    echo "$service $(docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}} {{.HostConfig.Memory}}' "$(main ps -q "$service")")"
+    container=$(main ps -q "$service") || return 1
+    state=$(docker inspect -f '{{.State.OOMKilled}} {{.RestartCount}} {{.HostConfig.Memory}}' "$container") || return 1
+    echo "$service $state"
   done
 }
 flags >"$out/flags.txt"
