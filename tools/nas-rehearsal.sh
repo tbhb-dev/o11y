@@ -87,11 +87,34 @@ stub ssh <<'STUB'
 for command; do :; done
 exec sh -c "$command"
 STUB
+# The deploy host's dockerd refuses to create a missing bind mount source,
+# where this engine creates it. So before a Compose run or up, every bind
+# source of the model must already exist. The words before the subcommand
+# are Compose's own options, none of which holds a space.
 stub sudo <<'STUB'
 [ "$1" = -n ] || exit 97
 shift
 case $1 in
-"$O11Y_REMOTE_DOCKER" | "$O11Y_REMOTE_COMPOSE") exec "$@" ;;
+"$O11Y_REMOTE_DOCKER") exec "$@" ;;
+"$O11Y_REMOTE_COMPOSE")
+  options=
+  for word; do
+    case $word in run | up) break ;; esac
+    options="$options $word"
+  done
+  if [ "$word" = run ] || [ "$word" = up ]; then
+    # shellcheck disable=SC2086 # the options split on spaces
+    model=$($options config --format json) || exit 1
+    sources=$(printf '%s' "$model" | jq -r '.services[].volumes[]? | select(.type == "bind") | .source') || exit 1
+    for source in $sources; do
+      [ -e "$source" ] || {
+        echo "Bind mount failed: '$source' does not exist" >&2
+        exit 1
+      }
+    done
+  fi
+  exec "$@"
+  ;;
 esac
 echo "sudo: refused $1" >&2
 exit 97

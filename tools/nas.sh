@@ -139,12 +139,17 @@ q() {
   printf '%s' "${out# }"
 }
 
-# One multiplexed connection per run, so the agent signs once. The
-# connection master can outlive the task, so ssh gets no descriptor beyond
-# the standard three: the cleanup descriptor would hold the output open.
+# One multiplexed connection per run, so the agent signs once. The socket
+# lives in ~/.ssh, which is the user's own, rather than under TMPDIR: macOS's
+# TMPDIR is long enough that the socket's path, with the 17 characters ssh
+# appends while it binds, passes the 104-byte limit on a socket's path. Here
+# it is $HOME plus 51 bytes, which fits any HOME under 36, and no other user
+# can plant a directory in its way, as one could under a fixed name in /tmp.
+# The connection master can outlive the task, so ssh gets no descriptor
+# beyond the standard three: the cleanup descriptor would hold the output open.
 remote_stdin() {
-  local tmp=${TMPDIR:-/tmp}
-  ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=${tmp%/}/o11y-%C" \
+  [[ -d $HOME/.ssh ]] || mkdir -m 700 "$HOME/.ssh"
+  ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$HOME/.ssh/o11y-%C" \
     -- "$O11Y_SSH_HOST" "$1" 9>&-
 }
 
@@ -517,8 +522,24 @@ health_gate() {
   }
 }
 
+# The host's dockerd refuses to create a missing bind mount source, so the
+# data directory init mounts is made first, as the SSH user. Init sets the
+# owners and modes of what it creates inside, and a directory that exists
+# is left as it is.
+data_cmd() {
+  echo "mkdir -p -m 755 $dir/data"
+}
+
 up_cmd() {
   echo "$(compose_cmd o11y "$dir/releases/$1" .env compose.yaml) up -d --remove-orphans"
+}
+
+# fs_type_cmd: the type of the filesystem under O11Y_REMOTE_DIR, or under
+# its nearest existing ancestor before the first stage, else "unknown".
+# df -T names it from the mount table. Where df lacks -T, or prints - because
+# the table doesn't name the type, stat reads it from the filesystem itself.
+fs_type_cmd() {
+  echo "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; t=\$(df -PT \"\$d\" 2>/dev/null | awk 'NR == 2 { print \$2 }'); case \$t in '' | -) t=\$(stat -f -c %T \"\$d\" 2>/dev/null) ;; esac; echo \"\${t:-unknown}\""
 }
 
 # --- tasks ----------------------------------------------------------------
@@ -555,6 +576,7 @@ preflight() {
     "netstat -ltn | grep -E $(q ":($grafana_port|$grpc_port|$http_port) ") || true"
   fact noted "kilobytes free where O11Y_REMOTE_DIR will live" text \
     "d=$dir; while [ ! -e \"\$d\" ]; do d=\$(dirname \"\$d\"); done; df -Pk \"\$d\" | awk 'NR == 2 { print \$4 }'"
+  fact noted "filesystem where O11Y_REMOTE_DIR will live" text "$(fs_type_cmd)"
   fact noted "existing containers" lines "$docker ps -a --format $(q '{{.Names}} {{.Image}} {{.Status}}')"
   [[ $failed -eq 0 ]] || die "$task: a required fact does not hold"
 }
@@ -593,6 +615,7 @@ deploy_plan() {
     lock_cmd
     verify_cmd "$dir/releases/$id"
     attempt_cmd "$id"
+    data_cmd
     echo "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init"
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
@@ -611,6 +634,7 @@ deploy() {
   fi
   current=$(promoted current)
   quiet remote "$(attempt_cmd "$id")" || die "$task: the attempt could not be recorded"
+  quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
@@ -813,7 +837,7 @@ gate_test() {
   *) die "$task: the host could not be asked whether gate data exists" ;;
   esac
 
-  facts=$(remote "uname -r; df -PT $dir | awk 'NR == 2 { print \$2 }'" | redact | tr '\n' ' ') || facts=unknown
+  facts=$(remote "uname -r; $(fs_type_cmd)" | redact | tr '\n' ' ') || facts=unknown
   echo "note $task: kernel and filesystem under O11Y_REMOTE_DIR: $facts"
 
   while read -r service binary flag; do
@@ -822,6 +846,9 @@ gate_test() {
   done <<<"$gate_binaries"
   ok "$task: the binary of each of the eight images runs on the host's kernel"
 
+  # Made only now, after the check above and right before the probe's init
+  # first mounts it. See data_cmd.
+  quiet remote "mkdir -m 755 $data" || die "$task: the gate data directory could not be created"
   if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null 9>&-; then
     if remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) logs --no-color --no-log-prefix rustfs" 2>&1 |
       grep -qi 'unsupported filesystem'; then
