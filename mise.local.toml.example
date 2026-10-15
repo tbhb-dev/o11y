@@ -20,7 +20,3 @@ O11Y_PRIVATE_STRINGS = ""
 # GiB that preflight, gate-test and deploy require free under O11Y_REMOTE_DIR,
 # on top of 10 percent of the filesystem. Not private.
 # O11Y_DISK_RESERVE_GB = "50"
-# The host's own name, stamped on the stack's OTLP metrics as host.name.
-# Private: the leak check and the task output redaction treat it that way.
-# Without it the metrics carry unknown-host.
-# O11Y_HOST_NAME = ""

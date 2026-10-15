@@ -97,13 +97,15 @@ run_check() {
   done
 }
 
-@test "the host name stamped on the stack's metrics is a private literal" {
-  export O11Y_HOST_NAME=wombat-node
+@test "the deploy host's name that stage read is a private literal" {
+  printf '%s\n' tmp/ >>.gitignore
+  mkdir -p tmp/deploy
+  printf 'wombat-node\n' >tmp/deploy/host-name
   printf 'host wombat-node\n' >leak.md
-  git add leak.md
+  git add .gitignore leak.md
   run_check
   [ "$status" -eq 1 ]
-  [[ $output == *"leak.md:1: private literal O11Y_HOST_NAME"* ]]
+  [[ $output == *"leak.md:1: private literal the deploy host's name (tmp/deploy/host-name)"* ]]
   no_value wombat-node
 }
 

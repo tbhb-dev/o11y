@@ -140,7 +140,8 @@ services:
       GOMEMLIMIT: 600MiB
       O11Y_CLUSTER: ${O11Y_CLUSTER:-o11y}
       # Stamped on the stack's own OTLP metrics in place of whatever a
-      # container reports. The host name is private.
+      # container reports. Stage and gate-test read the host name over SSH,
+      # and it is private.
       O11Y_HOST_NAME: ${O11Y_HOST_NAME:-unknown-host}
       O11Y_ENVIRONMENT: ${O11Y_ENVIRONMENT:-production}
     stop_grace_period: 30s
