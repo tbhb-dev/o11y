@@ -152,8 +152,11 @@ remote() {
 }
 
 # raw: stdin into the task log as diagnostics, which the operator's copy
-# leaves out.
+# leaves out. It always runs in a child shell, behind a pipe or a process
+# substitution, and ignores INT and TERM there: a signal to the task's
+# process group must not end it while the task still writes to it.
 raw() {
+  trap '' INT TERM
   sed 's/^/raw| /' >>"$log"
 }
 
