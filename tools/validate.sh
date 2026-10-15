@@ -169,6 +169,7 @@ below_ga() {
 # component. At the default level Alloy exits 1 and names every component
 # below it, and the one it names must be the one the level was lowered for.
 status=0
+# shellcheck disable=SC2312 # a missing config directory fails docker run, so the check fails
 run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy || status=$?
 if [[ $status -eq 0 ]]; then
   echo "FAIL alloy: config.alloy passes at the default stability level, so $alloy_stability is not needed" >&2
@@ -177,11 +178,11 @@ elif [[ $status -ne 1 ]]; then
   echo "FAIL alloy: the check at the default stability level did not run (exit $status)" >&2
   cat "$log" >&2
   failed=1
-elif ! below=$(below_ga "$log"); then
+elif ! below=$(below_ga "$log" | sort -u); then
   echo "FAIL alloy: Alloy's output at the default stability level holds an error this check doesn't recognize" >&2
   cat "$log" >&2
   failed=1
-elif [[ $(sort -u <<<"$below") != otelcol.processor.deltatocumulative ]]; then
+elif [[ $below != otelcol.processor.deltatocumulative ]]; then
   echo "FAIL alloy: config.alloy uses a component below generally available other than otelcol.processor.deltatocumulative" >&2
   cat "$log" >&2
   failed=1
