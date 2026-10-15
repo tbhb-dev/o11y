@@ -211,6 +211,33 @@ up_panels() {
   printf '%s\n' "${results[@]}" | jq -se "add | sort | $1" >/dev/null
 }
 
+# seed: one up of 1, stamped now, under a job no release scrapes,
+# o11y/rehearsal-seed, written through Alloy's OTLP receiver. Kept fresh
+# while the panels are read, it fails an Up panel that keeps the freshness
+# filter but loses its job selector.
+seed() {
+  local rustfs
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
+  [[ -n $rustfs ]] || return 1
+  printf '%s' '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"rehearsal-seed"}},{"key":"service.namespace","value":{"stringValue":"o11y"}}]},"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"'"$(date +%s)"'000000000"}]}}]}]}]}' |
+    docker exec -i "$rustfs" curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Content-Type: application/json' \
+      --data-binary @- http://alloy:4318/v1/metrics | grep -qx 200
+}
+
+# seeded: the seed series is in Mimir and fresh, so the check above means
+# something.
+seeded() {
+  local rustfs query
+  rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
+  query=$(jq -rn '"up{job=\"o11y/rehearsal-seed\"} and time() - timestamp(up{job=\"o11y/rehearsal-seed\"}) < 90" | @uri')
+  docker exec "$rustfs" curl -s -m 15 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query" |
+    jq -e '.data.result | length == 1' >/dev/null
+}
+
+seed_and_read() {
+  seed && seeded && up_panels "$1"
+}
+
 on_base "preflight failed" preflight
 on_base "stage failed" stage
 first=releases/$(cat "$base_work/tmp/deploy/staged")
@@ -232,21 +259,23 @@ second=releases/$(cat tmp/deploy/staged)
   die "rehearsal: the second deploy did not move previous and current"
 ok "rehearsal: second deploy, of this tree, is current, the base is previous"
 
+poll 120 seed || die "rehearsal: the seed series could not be written"
 step "rollback --previous failed" rollback --previous
 grep -q "(release ${first#releases/}) Up" <<<"$(bash tools/nas.sh status)" ||
   die "rehearsal: after rollback --previous the containers do not run the base release"
 ok "rehearsal: rollback --previous runs the base release again"
 # This tree's release wrote series of its own, which stay in Mimir after the
-# rollback. The base's Up panels must show exactly the jobs the base
-# scrapes, each up. With Alloy stopped and Mimir still answering, the last
-# samples age, and the panels must drop them rather than show the jobs up.
+# rollback, and the seed adds a fresh one under another o11y/* job. The
+# base's Up panels must show exactly the jobs the base scrapes, each up.
+# With Alloy stopped and Mimir still answering, the last samples age, and
+# the panels must drop them rather than show the jobs up.
 base_up=$(grep -o '"job" = "[^"]*"' "$base_work/config/alloy/config.alloy" | cut -d'"' -f4 | jq -Rsc 'split("\n") | map(select(. != "")) | map([., "1"]) | sort')
-poll 180 up_panels ". == $base_up" || die "rehearsal: after rollback --previous the Up panels do not show exactly the base's jobs up"
+poll 180 seed_and_read ". == $base_up" || die "rehearsal: after rollback --previous, with a fresh seed series in Mimir, the Up panels do not show exactly the base's jobs up"
 docker stop "$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
 poll 180 up_panels '. == []' || die "rehearsal: with Alloy stopped the Up panels still return their last samples"
 docker start "$(docker ps -aq --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
 poll 180 up_panels ". == $base_up" || die "rehearsal: once Alloy is back the Up panels do not show the base's jobs up"
-ok "rehearsal: after rollback --previous the Up panels show exactly the base's jobs up, and nothing once their samples are stale"
+ok "rehearsal: after rollback --previous the Up panels show exactly the base's jobs up, not a fresh seed series, and nothing once their samples are stale"
 
 step "down failed" down
 [[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y) ]] || die "rehearsal: down left containers"
