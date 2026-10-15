@@ -655,6 +655,19 @@ everything() {
   [[ $output != *"mise run rollback"* ]] || false
 }
 
+# Alloy exits at start when it can't load its config, as it does without the
+# stability level a component needs, and Compose then restarts it.
+@test "an Alloy that keeps restarting fails the health gate and promotes nothing" {
+  healthy o11y
+  sed -i 's/^\(o11y alloy .*\) Up 1 minute (healthy)$/\1 Restarting (1) 5 seconds ago/' "$dir/containers"
+  grep -q '^o11y alloy .* Restarting (1)' "$dir/containers"
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"the containers of o11y did not all come up healthy"* ]] || false
+  [ ! -e "$remote/current" ]
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
 @test "a failed receipt after an earlier deploy promotes nothing, unlocks, and names rollback" {
   healthy o11y
   go deploy

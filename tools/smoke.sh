@@ -420,6 +420,10 @@ mimir_value() {
 arrived() {
   [[ $(mimir_value o11y_smoke_delta_total) == 7 && $(mimir_value o11y_smoke_cumulative_total) == 5 ]]
 }
+# Groups 3 and 5 already show this Alloy starting and ingesting; this shows
+# it does so at the stability level the processor needs.
+[[ $(docker inspect -f '{{json .Args}}' "$(main ps -q alloy)") == *'"--stability.level=experimental"'* ]] ||
+  die "11: Alloy runs without --stability.level=experimental"
 delta_run=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
 before=$(discarded) || die "11: Mimir's discarded samples could not be read"
 now=$(date +%s)
