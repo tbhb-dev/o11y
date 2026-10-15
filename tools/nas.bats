@@ -1162,8 +1162,8 @@ STUB
   grep -qE '^receipt.sh --grpc -- docker run --rm --add-host otlp\.example\.ts\.net:192\.0\.2\.20 ghcr\.io/[^ ]+@sha256:[0-9a-f]+ traces --otlp-endpoint otlp\.example\.ts\.net:4317 \[' "$dir/tools.log"
   [ ! -e "$dir/ssh.log" ]
   # Each run also asks for the anonymous home, with no credentials.
-  [ "$(cat "$dir/curl.log")" = "-sS -m 15 https://grafana.example.ts.net/api/dashboards/home
--sS -m 15 https://grafana.example.ts.net/api/dashboards/home" ]
+  [ "$(cat "$dir/curl.log")" = "-fsS -m 15 https://grafana.example.ts.net/api/dashboards/home
+-fsS -m 15 https://grafana.example.ts.net/api/dashboards/home" ]
   [[ $output == *"ok smoke-remote: the anonymous home is the Stack health dashboard"* ]] || false
 }
 

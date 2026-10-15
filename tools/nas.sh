@@ -539,6 +539,7 @@ receipt() {
 # org preferences whole, and nothing else sets them. The password goes from
 # its file to curl's config on stdin, so it is on no command line.
 home_cmd() {
+  # shellcheck disable=SC2312 # q only quotes
   echo "$docker exec $1 cat /run/o11y/grafana_admin_password | sed $(q 's/^/user = "admin:/; s/$/"/') | $docker exec -i $2 curl -s -o /dev/null -w $(q '%{http_code}') -m 10 -K - -X PUT -H $(q 'Content-Type: application/json') -d $(q '{"homeDashboardUID":"o11y-stack-health"}') http://grafana:3000/api/org/preferences"
 }
 
@@ -546,6 +547,7 @@ home_cmd() {
 # logins can lock the admin account for a while.
 set_home() {
   local grafana rustfs code
+  # shellcheck disable=SC2312 # the command builders only echo
   grafana=$(container_of "$1" grafana) && rustfs=$(container_of "$1" rustfs) &&
     code=$(remote "$(home_cmd "$grafana" "$rustfs")" 2>>"$diagnostics_log") && [[ $code == 200 ]]
 }
@@ -849,7 +851,7 @@ smoke_remote() {
   esac
   # What an anonymous user gets as home; see home_cmd. The assignment keeps
   # the pipeline's status, so a curl or jq that fails after printing fails.
-  home=$(curl -sS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -er '.redirectUri') ||
+  home=$(curl -fsS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -er '.redirectUri') ||
     die "$task: the anonymous home could not be read"
   [[ $home == /d/o11y-stack-health/* ]] || die "$task: the anonymous home is not the Stack health dashboard"
   ok "$task: the anonymous home is the Stack health dashboard"

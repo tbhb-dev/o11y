@@ -282,13 +282,14 @@ provisioned=$(curl -fs -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | j
   die "4: the provisioned dashboard is missing"
 # The call deploy makes on every run (home_cmd in tools/nas.sh), until the
 # Grafana pin has the fix for grafana/grafana#131876.
-[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - -X PUT -H 'Content-Type: application/json' \
-  -d '{"homeDashboardUID":"o11y-stack-health"}' "$grafana/api/org/preferences") == 200 ]] ||
+printf 'user = "admin:%s"\n' "$sentinel_password" | output_is 200 grafana_status -K - -X PUT -H 'Content-Type: application/json' \
+  -d '{"homeDashboardUID":"o11y-stack-health"}' "$grafana/api/org/preferences" ||
   die "4: the home dashboard could not be set"
-[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | curl -s -m 15 -K - "$grafana/api/org/preferences" | jq -r '.homeDashboardUID') == o11y-stack-health ]] ||
+home_uid=$(printf 'user = "admin:%s"\n' "$sentinel_password" | curl -fs -m 15 -K - "$grafana/api/org/preferences" | jq -r '.homeDashboardUID') &&
+  [[ $home_uid == o11y-stack-health ]] ||
   die "4: the org preferences do not name the provisioned dashboard as home"
 # An anonymous user gets the org preferences, so its home is that dashboard.
-[[ $(curl -s -m 15 "$grafana/api/dashboards/home" | jq -r '.redirectUri') == /d/o11y-stack-health/* ]] ||
+home=$(curl -fs -m 15 "$grafana/api/dashboards/home" | jq -r '.redirectUri') && [[ $home == /d/o11y-stack-health/* ]] ||
   die "4: the anonymous home is not the provisioned dashboard"
 main logs --no-log-prefix grafana >"$out/grafana.log" 2>&1 || die "4: the Grafana log could not be read"
 # A log without provisioning lines would pass the error check vacuously.
