@@ -106,6 +106,15 @@ exec "$STUB_TAR" "$@"
 STUB
   stub "$dir/bin/git" <<<'echo abc1234'
   stub "$dir/bin/getent" <<<'echo "192.0.2.20 STREAM otlp.example.ts.net"'
+  # This machine's curl, which smoke-remote asks for the anonymous home.
+  stub "$dir/bin/curl" <<'STUB'
+printf '%s\n' "$*" >>"$STUB/curl.log"
+printf '{"redirectUri":"%s"}' "${STUB_HOME_REDIRECT-/d/o11y-stack-health/stack-health}"
+# STUB_CURL_TRAILER follows the answer with more output, STUB_CURL_EXIT ends
+# with that status, as a timeout after the body would.
+printf '%s' "${STUB_CURL_TRAILER:-}"
+exit "${STUB_CURL_EXIT:-0}"
+STUB
   # The pinned Compose, with its calls recorded. nas.sh clears the
   # environment for it, so the paths are written into the stub.
   stub "$dir/bin/compose" <<STUB
@@ -161,6 +170,13 @@ exec)
   case $all in
   *grafana_admin_password*) echo stub-grafana-password ;;
   *" env"* | *printenv*) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
+  *"-X PUT"*)
+    # The home dashboard call: its arguments and the curl config on stdin.
+    printf '%s\n' "$@" >"$STUB/home.args"
+    cat >"$STUB/home.stdin"
+    printf '%s' "${STUB_HOME_HTTP:-200}"
+    [ -z "${STUB_HOME_THEN_FAILS:-}" ] || exit 255
+    ;;
   *"-X POST"*)
     printf 204
     [ -z "${STUB_FLUSH_THEN_FAILS:-}" ] || exit 255
@@ -582,6 +598,72 @@ everything() {
   done
 }
 
+@test "deploy sets Grafana's home dashboard once it has promoted the release" {
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  id=$(staged)
+  in_order "http://grafana:3000/api/health" \
+    "ln -sfn releases/$id current.new && mv -T current.new current" \
+    "exec o11y-grafana-1 cat /run/o11y/grafana_admin_password | sed " \
+    "rmdir $remote/.deploy.lock"
+  [ "$(grep -c 'X PUT' "$dir/ssh.log")" -eq 1 ]
+  [[ $output == *"ok deploy: Grafana's home dashboard is the Stack health dashboard"* ]] || false
+  [ "$(cat "$dir/home.args")" = 'exec
+-i
+o11y-rustfs-1
+curl
+-s
+-o
+/dev/null
+-w
+%{http_code}
+-m
+10
+-K
+-
+-X
+PUT
+-H
+Content-Type: application/json
+-d
+{"homeDashboardUID":"o11y-stack-health"}
+http://grafana:3000/api/org/preferences' ]
+  # The password reaches curl on stdin only.
+  [ "$(cat "$dir/home.stdin")" = 'user = "admin:stub-grafana-password"' ]
+  ! grep -rqF stub-grafana-password "$dir/ssh.log" "$dir/sudo.log" "$dir/output" "$repo/tmp" || false
+}
+
+@test "a home dashboard call that Grafana refuses keeps the promotion, warns with the fix, and fails the run once" {
+  healthy o11y
+  STUB_HOME_HTTP=401 go deploy
+  [ "$status" -ne 0 ]
+  id=$(staged)
+  [ "$(readlink "$remote/current")" = "releases/$id" ]
+  [[ $output == *"ok deploy: release $id passed the health gate and is now current"* ]] || false
+  [[ $output == *"WARN deploy: release $id is current, but Grafana's home dashboard could not be set"* ]] || false
+  [[ $output == *"O11Y_CONFIRM=deploy mise run deploy"*"Default preferences"* ]] || false
+  [[ $output != *"was not promoted"* ]] || false
+  [[ $output != *"mise run rollback"* ]] || false
+  # One attempt: repeated failed logins can lock the admin account.
+  [ "$(grep -c 'X PUT' "$dir/ssh.log")" -eq 1 ]
+  [ ! -e "$remote/.deploy.lock" ]
+  # Running it again sets the home on the release already current.
+  rm "$dir/ssh.log"
+  go deploy
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$remote/current")" = "releases/$id" ]
+  recorded "X PUT"
+}
+
+@test "a home dashboard call that answers 200 and then fails still warns and fails the run" {
+  healthy o11y
+  STUB_HOME_THEN_FAILS=1 go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"WARN deploy: release $(staged) is current, but Grafana's home dashboard could not be set"* ]] || false
+  [ "$(readlink "$remote/current")" = "releases/$(staged)" ]
+}
+
 @test "a first deploy creates the data directory as the SSH user before init mounts it" {
   healthy o11y
   [ ! -e "$remote/data" ]
@@ -948,7 +1030,7 @@ $t serve status" ]
   [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
   [[ $output == *"compose.init.yaml run --rm -T init"* ]] || false
   [[ $output == *"compose.yaml up -d --remove-orphans"* ]] || false
-  [[ $output == *"mv -T current.new current"* ]] || false
+  [[ $output == *"mv -T current.new current"*"exec <grafana container> cat /run/o11y/grafana_admin_password | sed "*" -X PUT "*"'{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"* ]] || false
 }
 
 @test "preflight changes nothing on the host" {
@@ -1079,6 +1161,33 @@ STUB
   [ "$status" -eq 0 ]
   grep -qE '^receipt.sh --grpc -- docker run --rm --add-host otlp\.example\.ts\.net:192\.0\.2\.20 ghcr\.io/[^ ]+@sha256:[0-9a-f]+ traces --otlp-endpoint otlp\.example\.ts\.net:4317 \[' "$dir/tools.log"
   [ ! -e "$dir/ssh.log" ]
+  # Each run also asks for the anonymous home, with no credentials.
+  [ "$(cat "$dir/curl.log")" = "-sS -m 15 https://grafana.example.ts.net/api/dashboards/home
+-sS -m 15 https://grafana.example.ts.net/api/dashboards/home" ]
+  [[ $output == *"ok smoke-remote: the anonymous home is the Stack health dashboard"* ]] || false
+}
+
+@test "smoke-remote fails when the anonymous home is not the Stack health dashboard" {
+  STUB_HOME_REDIRECT=/d/other/other nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL smoke-remote: the anonymous home is not the Stack health dashboard"* ]] || false
+  STUB_HOME_REDIRECT= nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
+}
+
+@test "smoke-remote fails when curl answers with the right home and then fails" {
+  STUB_CURL_EXIT=28 nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL smoke-remote: the anonymous home could not be read"* ]] || false
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
+}
+
+@test "smoke-remote fails when the right home is followed by output that isn't JSON" {
+  STUB_CURL_TRAILER='}garbage' nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL smoke-remote: the anonymous home could not be read"* ]] || false
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
 }
 
 # --- plumbing -------------------------------------------------------------
@@ -1193,7 +1302,13 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   ! grep -q secrets "$dir/tar.log" || false
   ! grep -qE ' config( |$)' "$dir/sudo.log" || false
   ! grep -qE '(^| )(inspect|printenv|env)( |$)' "$dir/sudo.log" || false
-  [ "$(grep -c grafana_admin_password "$dir/ssh.log")" -eq 1 ]
+  # The password file is read by exactly two commands: grafana-password's,
+  # once, and the home dashboard call, once per deploy.
+  password="$O11Y_REMOTE_DOCKER exec \$(sudo -n $O11Y_REMOTE_DOCKER ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=grafana) cat /run/o11y/grafana_admin_password"
+  home="sudo -n $O11Y_REMOTE_DOCKER exec o11y-grafana-1 cat /run/o11y/grafana_admin_password | sed 's/^/user = \"admin:/; s/\$/\"/' | sudo -n $O11Y_REMOTE_DOCKER exec -i o11y-rustfs-1 curl -s -o /dev/null -w '%{http_code}' -m 10 -K - -X PUT -H 'Content-Type: application/json' -d '{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"
+  [ "$(grep -c grafana_admin_password "$dir/ssh.log")" -eq 3 ]
+  [ "$(grep -cxF -- "sudo -n $password" "$dir/ssh.log")" -eq 1 ]
+  [ "$(grep -cxF -- "$home" "$dir/ssh.log")" -eq 2 ]
   # Locally, `config` only ever loads the dummy env file.
   ! grep ' config' "$dir/compose.log" | grep -qv -e '--env-file [^ ]*/\.env\.validate ' || false
 }
