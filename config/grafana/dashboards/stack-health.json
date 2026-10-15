@@ -1162,35 +1162,35 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/alloy\"} / 2000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/alloy\"} / 3000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
         },
         {
           "refId": "B",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/grafana\"} / 7000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/grafana\"} / 10000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
         },
         {
           "refId": "C",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/loki\"} / 3000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/loki\"} / 5000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
         },
         {
           "refId": "D",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/mimir\"} / 5000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/mimir\"} / 8000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
         },
         {
           "refId": "E",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/tempo\"} / 2000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/tempo\"} / 3000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true

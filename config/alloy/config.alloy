@@ -94,13 +94,15 @@ otelcol.exporter.otlphttp "mimir" {
 // <namespace>/<component> shape.
 // Each sample_limit is the most samples one scrape returned on a local
 // stack under telemetrygen at 50 items a second per signal (alloy 1282,
-// grafana 4676, loki 2185, mimir 3665, tempo 1051), plus at least 30
-// percent, rounded up to the next thousand. The Stack health dashboard
-// shows each against its limit.
+// grafana 4676, loki 2185, mimir 3665, tempo 1051), at least doubled and
+// rounded up to the next thousand. Going over drops the whole scrape and
+// shows the job as down, and Grafana's and Mimir's series grow as
+// dashboards and clients are added, so the margin is wide. The Stack
+// health dashboard shows each against its limit.
 prometheus.scrape "alloy" {
 	targets         = [{"__address__" = "alloy:12345", "job" = "o11y/alloy"}]
 	scrape_interval = "30s"
-	sample_limit    = 2000
+	sample_limit    = 3000
 	label_limit     = 40
 	body_size_limit = "16MiB"
 	forward_to      = [prometheus.relabel.stack.receiver]
@@ -109,7 +111,7 @@ prometheus.scrape "alloy" {
 prometheus.scrape "loki" {
 	targets         = [{"__address__" = "loki:3100", "job" = "o11y/loki"}]
 	scrape_interval = "30s"
-	sample_limit    = 3000
+	sample_limit    = 5000
 	label_limit     = 40
 	body_size_limit = "16MiB"
 	forward_to      = [prometheus.relabel.stack.receiver]
@@ -118,7 +120,7 @@ prometheus.scrape "loki" {
 prometheus.scrape "tempo" {
 	targets         = [{"__address__" = "tempo:3200", "job" = "o11y/tempo"}]
 	scrape_interval = "30s"
-	sample_limit    = 2000
+	sample_limit    = 3000
 	label_limit     = 40
 	body_size_limit = "16MiB"
 	forward_to      = [prometheus.relabel.stack.receiver]
@@ -127,7 +129,7 @@ prometheus.scrape "tempo" {
 prometheus.scrape "mimir" {
 	targets         = [{"__address__" = "mimir:8080", "job" = "o11y/mimir"}]
 	scrape_interval = "30s"
-	sample_limit    = 5000
+	sample_limit    = 8000
 	label_limit     = 40
 	body_size_limit = "16MiB"
 	forward_to      = [prometheus.relabel.stack.receiver]
@@ -136,7 +138,7 @@ prometheus.scrape "mimir" {
 prometheus.scrape "grafana" {
 	targets         = [{"__address__" = "grafana:3000", "job" = "o11y/grafana"}]
 	scrape_interval = "30s"
-	sample_limit    = 7000
+	sample_limit    = 10000
 	label_limit     = 40
 	body_size_limit = "16MiB"
 	forward_to      = [prometheus.relabel.stack.receiver]
