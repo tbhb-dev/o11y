@@ -161,8 +161,15 @@ exec)
   case $all in
   *grafana_admin_password*) echo stub-grafana-password ;;
   *" env"* | *printenv*) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
-  *"-X POST"*) printf 204 ;;
-  *curl*) printf '%s' "${STUB_HTTP:-200}" ;;
+  *"-X POST"*)
+    printf 204
+    [ -z "${STUB_FLUSH_THEN_FAILS:-}" ] || exit 255
+    ;;
+  *curl*)
+    printf '%s' "${STUB_HTTP:-200}"
+    # STUB_HTTP_THEN_FAILS answers, then fails, as a dropped connection can.
+    [ -z "${STUB_HTTP_THEN_FAILS:-}" ] || exit 255
+    ;;
   esac
   ;;
 inspect) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
@@ -215,7 +222,11 @@ esac
 case $all in
 *" config"*) case $all in *" -q"*) ;; *) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;; esac ;;
 *"version --short"*) echo v2.20.1-stub ;;
-*"s3probe count"*) echo 3 ;;
+*"s3probe count"*)
+  echo 3
+  # STUB_COUNT_FAILS prints a count, then fails, as a dropped connection can.
+  [ -z "${STUB_COUNT_FAILS:-}" ] || exit 255
+  ;;
 *logs*rustfs*) [ ! -f "$STUB/rustfs.log" ] || cat "$STUB/rustfs.log" ;;
 *logs*)
   # Grafana logs the environment overrides it starts with.
@@ -277,6 +288,15 @@ case "$*" in
 esac
 exec "$STUB_GREP" "$@"
 STUB
+  # STUB_TR_FAILS makes the tr that strips carriage returns fail after
+  # passing its input through.
+  stub "$dir/bin/tr" <<'STUB'
+if [ -n "${STUB_TR_FAILS:-}" ] && [ "$*" = '-d \r' ]; then
+  cat
+  exit 2
+fi
+exec "$STUB_TR" "$@"
+STUB
   # STUB_TAIL_FAILS makes tail fail, so the operator's copy of the output
   # can't be shown.
   stub "$dir/bin/tail" <<'STUB'
@@ -287,7 +307,8 @@ STUB
   STUB_TAIL=$(command -v tail)
   STUB_SED=$(command -v sed)
   STUB_GREP=$(command -v grep)
-  export STUB=$dir STUB_TAR STUB_TAIL STUB_SED STUB_GREP PATH="$dir/bin:$PATH"
+  STUB_TR=$(command -v tr)
+  export STUB=$dir STUB_TAR STUB_TAIL STUB_SED STUB_GREP STUB_TR PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
@@ -653,6 +674,15 @@ everything() {
 @test "a service that is up but not ready fails the health gate" {
   healthy o11y
   STUB_HTTP=503 go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"is not ready"* ]] || false
+  [ ! -e "$remote/current" ]
+  [ ! -e "$dir/tools.log" ]
+}
+
+@test "a readiness check that answers 200 and then fails fails the health gate" {
+  healthy o11y
+  STUB_HTTP_THEN_FAILS=1 go deploy
   [ "$status" -ne 0 ]
   [[ $output == *"is not ready"* ]] || false
   [ ! -e "$remote/current" ]
@@ -1628,4 +1658,30 @@ wait_for() {
   STUB_GREP_FAILS=1 nas serve-status
   [ "$status" -eq 0 ]
   [[ $output == *"No serve config"* ]] || false
+}
+
+@test "an object count that prints a number and then fails fails gate-test" {
+  healthy o11y-gate
+  layout
+  STUB_COUNT_FAILS=1 O11Y_CONFIRM=gate-test nas gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"the loki bucket is empty after a flush"* ]] || false
+  [[ $output != *"the rehearsal passed"* ]] || false
+}
+
+@test "a carriage-return filter that fails fails gate-test" {
+  healthy o11y-gate
+  layout
+  STUB_TR_FAILS=1 O11Y_CONFIRM=gate-test nas gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"the loki bucket is empty after a flush"* ]] || false
+  [[ $output != *"the rehearsal passed"* ]] || false
+}
+
+@test "a flush that answers 204 and then fails fails gate-test" {
+  healthy o11y-gate
+  layout
+  STUB_FLUSH_THEN_FAILS=1 O11Y_CONFIRM=gate-test nas gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"Loki's flush endpoint failed"* ]] || false
 }

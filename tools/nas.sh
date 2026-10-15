@@ -479,7 +479,9 @@ http_status() {
 }
 
 is_ready() {
-  [[ $(http_status "$1" "$2") == 200 ]]
+  local code
+  code=$(http_status "$1" "$2") || return 1
+  [[ $code == 200 ]]
 }
 
 # all_ready <project>: prints the first thing that is not ready and fails.
@@ -489,7 +491,10 @@ all_ready() {
     echo "the containers of $1 did not all come up healthy"
     return 1
   }
-  rustfs=$(container_of "$1" rustfs)
+  rustfs=$(container_of "$1" rustfs) || {
+    echo "the containers of $1 could not be listed"
+    return 1
+  }
   for service in "${services[@]}"; do
     poll "$timeout" is_ready "$rustfs" "$(ready_url "$service")" || {
       echo "$service is not ready"
@@ -502,7 +507,7 @@ all_ready() {
 # the stack's network.
 receipt() {
   local rustfs
-  rustfs=$(container_of "$1" rustfs)
+  rustfs=$(container_of "$1" rustfs) || return 1
   shift
   O11Y_CHECK_CURL="bash tools/nas.sh in-network-curl $rustfs" O11Y_CHECK_OTLP_URL=http://alloy:4318 \
     O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null 9>&-
@@ -810,7 +815,7 @@ telemetrygen /telemetrygen --help
 s3probe /usr/local/bin/aws --version"
 
 gate_test() {
-  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status
+  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code
   id=$(new_release_id)
   out=tmp/deploy/gate-$id
   release=$dir/gate/releases/$id
@@ -880,11 +885,11 @@ gate_test() {
   rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
-    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$diagnostics_log" | tr -d '\r')
+    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$diagnostics_log" | tr -d '\r') || return 1
     [[ $count =~ ^[0-9]+$ && $count -ge 1 ]]
   }
-  [[ $(http_status "$rustfs" -X POST http://loki:3100/flush) == 204 ]] || die "$task: Loki's flush endpoint failed"
-  [[ $(http_status "$rustfs" -X POST http://mimir:8080/ingester/flush) == 204 ]] || die "$task: Mimir's flush endpoint failed"
+  code=$(http_status "$rustfs" -X POST http://loki:3100/flush) && [[ $code == 204 ]] || die "$task: Loki's flush endpoint failed"
+  code=$(http_status "$rustfs" -X POST http://mimir:8080/ingester/flush) && [[ $code == 204 ]] || die "$task: Mimir's flush endpoint failed"
   poll 120 has_objects loki || die "$task: the loki bucket is empty after a flush"
   poll 120 has_objects mimir-blocks || die "$task: the mimir-blocks bucket is empty after a flush"
   # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
