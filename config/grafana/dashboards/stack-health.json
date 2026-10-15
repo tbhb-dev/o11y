@@ -1169,7 +1169,7 @@
         },
         {
           "refId": "B",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/grafana\"} / 10000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/grafana\"} / 15000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
@@ -1183,7 +1183,7 @@
         },
         {
           "refId": "D",
-          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/mimir\"} / 8000",
+          "expr": "scrape_samples_post_metric_relabeling{job=\"o11y/mimir\"} / 11000",
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
