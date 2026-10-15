@@ -199,6 +199,13 @@ files=$(git ls-files --cached --others --exclude-standard -- '*.sh' ':!:.claude/
 [[ -z $files ]] || shfmt -d $files
 '''
 
+# What shellcheck can't see: a curl whose body is read without --fail
+# turns an HTTP error into an answer. .shellcheckrc turns on the masked
+# status check that covers the rest of that class.
+[tasks.lint-curl]
+description = "Fail when a curl in tools/*.sh has its body read without --fail"
+run = "bash tools/check-curl-fail.sh"
+
 [tasks.lint]
 extends = "devtools:lint"
 run = [
@@ -219,6 +226,7 @@ run = [
   "mise run devtools:lint-mise",
   "mise run lint-shell",
   "mise run lint-shell-fmt",
+  "mise run lint-curl",
 ]
 
 [tasks.test-vendored]
@@ -226,8 +234,8 @@ description = "Test the vendored-payload drift gate on a copy of the tree"
 run = "bats tools/check-vendored.bats"
 
 [tasks.test-tools]
-description = "Test the devtools pin parser and the prose fixer's failure handling"
-run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats"
+description = "Test the devtools pin parser, the prose fixer's failure handling and the curl check"
+run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats tools/check-curl-fail.bats"
 
 [tasks.test-leaks]
 description = "Test the leak check against throwaway repositories"
