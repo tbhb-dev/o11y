@@ -120,6 +120,8 @@ services:
       - --storage.path=/var/lib/alloy/data
       - --server.http.listen-addr=0.0.0.0:12345
       - --disable-reporting
+      # Only for otelcol.processor.deltatocumulative; see config.alloy.
+      - --stability.level=experimental
     volumes:
       - ${O11Y_CONFIG_ALLOY:?}:/etc/alloy:ro
       - ${O11Y_DATA_DIR:?}/alloy:/var/lib/alloy/data

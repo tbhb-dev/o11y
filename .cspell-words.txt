@@ -21,6 +21,7 @@ autostash
 btrfs
 buildx
 cksum
+deltatocumulative
 devtools
 dscacheutil
 esac
@@ -52,6 +53,7 @@ sharder
 shellcheck
 shfmt
 spanmetrics
+startswith
 tailnet
 tbhb
 telemetrygen
@@ -61,6 +63,7 @@ tonumber
 toplevel
 traceid
 urandom
+urlencode
 vendir
 venv
 worktree

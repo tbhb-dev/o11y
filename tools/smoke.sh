@@ -394,3 +394,40 @@ for sentinel in "$sentinel_access" "$sentinel_secret" "$sentinel_password"; do
     "this script's output=$out/transcript.log" || die "10: a sentinel secret leaked"
 done
 ok "10: no sentinel secret in the rendered output, container logs, process arguments or test output"
+
+# 11. Delta temporality. Claude Code and Codex send delta sums, which Mimir
+# rejects over OTLP and counts as otlp_parse_error; Alloy turns them into
+# cumulative ones. Two deltas, 3 then 4, must arrive as one series at 7, a
+# cumulative sum of 5 beside them must arrive as 5, and Mimir must have
+# discarded nothing. Its counter is read from Mimir itself, not from the
+# scraped copy, which lags by a scrape interval.
+discarded() {
+  main exec -T rustfs curl -sS -m 10 http://mimir:8080/metrics |
+    awk '/^cortex_discarded_samples_total\{/ && /reason="otlp_parse_error"/ { n += $NF } END { print n + 0 }'
+}
+# sum_point <name> <temporality: 1 delta, 2 cumulative> <value> <start> <end>
+sum_point() {
+  printf '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"o11y-smoke-delta"}}]},"scopeMetrics":[{"scope":{"name":"o11y-smoke"},"metrics":[{"name":"%s","sum":{"aggregationTemporality":%s,"isMonotonic":true,"dataPoints":[{"asInt":"%s","startTimeUnixNano":"%s000000000","timeUnixNano":"%s000000000","attributes":[{"key":"run_id","value":{"stringValue":"%s"}}]}]}}]}]}]}' \
+    "$1" "$2" "$3" "$4" "$5" "$delta_run"
+}
+send_point() {
+  sum_point "$@" | expect_status 200 -H 'Content-Type: application/json' --data-binary @- "$O11Y_CHECK_OTLP_URL/v1/metrics"
+}
+mimir_value() {
+  curl -s -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query" \
+    --data-urlencode "query=$1{run_id=\"$delta_run\"}" | jq -r '.data.result | if length == 1 then .[0].value[1] else "none" end'
+}
+arrived() {
+  [[ $(mimir_value o11y_smoke_delta_total) == 7 && $(mimir_value o11y_smoke_cumulative_total) == 5 ]]
+}
+delta_run=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+before=$(discarded) || die "11: Mimir's discarded samples could not be read"
+now=$(date +%s)
+send_point o11y_smoke_delta 1 3 "$((now - 20))" "$((now - 10))" || die "11: Alloy refused the first delta point"
+send_point o11y_smoke_delta 1 4 "$((now - 10))" "$now" || die "11: Alloy refused the second delta point"
+send_point o11y_smoke_cumulative 2 5 "$((now - 20))" "$now" || die "11: Alloy refused the cumulative point"
+poll 60 arrived ||
+  die "11: Mimir holds delta $(mimir_value o11y_smoke_delta_total) and cumulative $(mimir_value o11y_smoke_cumulative_total), not 7 and 5"
+after=$(discarded) || die "11: Mimir's discarded samples could not be read"
+[[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error"
+ok "11: two delta points arrive in Mimir as one cumulative series at their sum, a cumulative point as itself, and Mimir discards none"

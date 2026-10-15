@@ -76,6 +76,10 @@ run_image() {
     "$(image "$service")" "$@" >"$log" 2>&1
 }
 
+# Alloy validates at the stability level the stack runs it at.
+alloy_stability=$(jq -er '.services.alloy.command[] | select(startswith("--stability.level="))' <<<"$model") ||
+  die "alloy: compose.yaml runs Alloy without --stability.level"
+
 # validator <component> valid|invalid: runs the component's own config check
 # on its real config or on its fixture under tests/invalid/.
 validator() {
@@ -98,7 +102,7 @@ validator() {
     run_image mimir "$(config_dir MIMIR)" /etc/mimir "-config.file=$file" -config.expand-env=true -modules
     ;;
   alloy)
-    run_image alloy "$(config_dir ALLOY)" /etc/alloy validate "$file"
+    run_image alloy "$(config_dir ALLOY)" /etc/alloy validate "$alloy_stability" "$file"
     ;;
   esac
 }
@@ -141,6 +145,20 @@ for component in loki tempo mimir alloy; do
     ok "$component: valid accepted, invalid rejected"
   fi
 done
+
+# The stability level is process-wide, so it would admit any experimental
+# component. At the default level Alloy names every component below it, and
+# the one it names must be the one the level was lowered for.
+if run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy; then
+  echo "FAIL alloy: config.alloy passes at the default stability level, so $alloy_stability is not needed" >&2
+  failed=1
+elif [[ $(sed -n 's/.*component "\([^"]*\)" is at stability level.*/\1/p' "$log" | sort -u) != otelcol.processor.deltatocumulative ]]; then
+  echo "FAIL alloy: config.alloy uses a component below generally available other than otelcol.processor.deltatocumulative" >&2
+  cat "$log" >&2
+  failed=1
+else
+  ok "alloy: otelcol.processor.deltatocumulative is the only component below generally available"
+fi
 
 # Formatting only: the invalid Alloy fixture is well formed, so this has no
 # reject case.
