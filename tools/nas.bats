@@ -161,6 +161,13 @@ exec)
   case $all in
   *grafana_admin_password*) echo stub-grafana-password ;;
   *" env"* | *printenv*) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
+  *"-X PUT"*)
+    # The home dashboard call: its arguments and the curl config on stdin.
+    printf '%s\n' "$@" >"$STUB/home.args"
+    cat >"$STUB/home.stdin"
+    printf '%s' "${STUB_HOME_HTTP:-200}"
+    [ -z "${STUB_HOME_THEN_FAILS:-}" ] || exit 255
+    ;;
   *"-X POST"*)
     printf 204
     [ -z "${STUB_FLUSH_THEN_FAILS:-}" ] || exit 255
@@ -582,6 +589,59 @@ everything() {
   done
 }
 
+@test "deploy sets Grafana's home dashboard once the health gate passes and before it promotes" {
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  id=$(staged)
+  in_order "http://grafana:3000/api/health" \
+    "exec o11y-grafana-1 cat /run/o11y/grafana_admin_password | sed " \
+    "ln -sfn releases/$id current.new && mv -T current.new current"
+  [ "$(cat "$dir/home.args")" = 'exec
+-i
+o11y-rustfs-1
+curl
+-s
+-o
+/dev/null
+-w
+%{http_code}
+-m
+10
+-K
+-
+-X
+PUT
+-H
+Content-Type: application/json
+-d
+{"homeDashboardUID":"o11y-stack-health"}
+http://grafana:3000/api/org/preferences' ]
+  # The password reaches curl on stdin only.
+  [ "$(cat "$dir/home.stdin")" = 'user = "admin:stub-grafana-password"' ]
+  ! grep -rqF stub-grafana-password "$dir/ssh.log" "$dir/sudo.log" "$dir/output" "$repo/tmp" || false
+}
+
+@test "a home dashboard call that Grafana refuses fails the deploy and promotes nothing" {
+  healthy o11y
+  STUB_HOME_HTTP=401 go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL deploy: Grafana's home dashboard could not be set"* ]] || false
+  [[ $output == *"was not promoted"* ]] || false
+  ! recorded "mv -T current.new" || false
+  [ ! -e "$remote/current" ]
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "a home dashboard call that answers 200 and then fails still fails the deploy" {
+  healthy o11y
+  STUB_HOME_THEN_FAILS=1 go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL deploy: Grafana's home dashboard could not be set"* ]] || false
+  ! recorded "mv -T current.new" || false
+  [ ! -e "$remote/current" ]
+}
+
 @test "a first deploy creates the data directory as the SSH user before init mounts it" {
   healthy o11y
   [ ! -e "$remote/data" ]
@@ -935,7 +995,7 @@ $t serve status" ]
   [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
   [[ $output == *"compose.init.yaml run --rm -T init"* ]] || false
   [[ $output == *"compose.yaml up -d --remove-orphans"* ]] || false
-  [[ $output == *"mv -T current.new current"* ]] || false
+  [[ $output == *"exec <grafana container> cat /run/o11y/grafana_admin_password | sed "*" -X PUT "*"'{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"*"mv -T current.new current"* ]] || false
 }
 
 @test "preflight changes nothing on the host" {
@@ -1180,7 +1240,10 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   ! grep -q secrets "$dir/tar.log" || false
   ! grep -qE ' config( |$)' "$dir/sudo.log" || false
   ! grep -qE '(^| )(inspect|printenv|env)( |$)' "$dir/sudo.log" || false
-  [ "$(grep -c grafana_admin_password "$dir/ssh.log")" -eq 1 ]
+  # grafana-password reads the password file, and each deploy reads it only
+  # into curl's config on stdin.
+  [ "$(grep grafana_admin_password "$dir/ssh.log" | grep -vcF -- ' -K - ')" -eq 1 ]
+  [ "$(grep -cE 'cat /run/o11y/grafana_admin_password \| sed [^|]* \| [^|]* curl [^|]* -K - ' "$dir/ssh.log")" -eq 2 ]
   # Locally, `config` only ever loads the dummy env file.
   ! grep ' config' "$dir/compose.log" | grep -qv -e '--env-file [^ ]*/\.env\.validate ' || false
 }

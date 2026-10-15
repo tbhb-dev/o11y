@@ -25,7 +25,9 @@
 #   the real env file only where a container needs it (init, up, run); every
 #   other call names .env.validate, which points at a dummy. `config` runs
 #   only locally, only on that dummy. Nothing runs `docker inspect`.
-#   grafana-password is the one deliberate exception.
+#   grafana-password is the one deliberate exception, and deploy's home
+#   dashboard call pipes the Grafana password into curl's config on the host,
+#   never onto a command line or off the host.
 # - --remove-orphans is passed only with compose.yaml alone. With the init
 #   or tools file it would remove the running stack.
 #
@@ -513,6 +515,29 @@ receipt() {
     O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null 9>&-
 }
 
+# home_cmd <grafana container> <rustfs container>: sets the org's home
+# dashboard to the provisioned one. Grafana 13.2.4's home page asks anonymous
+# users for /api/user/teams and shows an Unauthorized error
+# (grafana/grafana#131876, fixed on main by #131892). A home dashboard in the
+# org preferences skips that page, and default_home_dashboard_path doesn't
+# set one. Drop this once the pin has the fix. The preference lives in
+# Grafana's database, so every deploy sets it again; the PUT replaces the
+# org preferences whole, and nothing else sets them. The password goes from
+# its file to curl's config on stdin, so it is on no command line.
+home_cmd() {
+  echo "$docker exec $1 cat /run/o11y/grafana_admin_password | sed $(q 's/^/user = "admin:/; s/$/"/') | $docker exec -i $2 curl -s -o /dev/null -w $(q '%{http_code}') -m 10 -K - -X PUT -H $(q 'Content-Type: application/json') -d $(q '{"homeDashboardUID":"o11y-stack-health"}') http://grafana:3000/api/org/preferences"
+}
+
+set_home() {
+  local grafana rustfs code
+  if grafana=$(container_of "$1" grafana) && rustfs=$(container_of "$1" rustfs) &&
+    code=$(remote "$(home_cmd "$grafana" "$rustfs")" 2>>"$diagnostics_log") && [[ $code == 200 ]]; then
+    return
+  fi
+  echo "FAIL $task: Grafana's home dashboard could not be set through its admin API" >&2
+  return 1
+}
+
 # health_gate <project> [receipt.sh arguments...]
 health_gate() {
   local project=$1 why
@@ -625,6 +650,7 @@ deploy_plan() {
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
     echo "$docker exec -i <rustfs container> curl ...    # readiness of each service, then the receipt check"
+    echo "$(home_cmd '<grafana container>' '<rustfs container>')    # the home dashboard"
     echo "$(swap_cmd "$id" '<the release current names>')    # on a first deploy, only current"
     echo "rmdir $dir/.deploy.lock"
   } | sed 's/^/  /'
@@ -642,7 +668,7 @@ deploy() {
   quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
-    health_gate o11y; then
+    health_gate o11y && set_home o11y; then
     swap_pending="$id $current"
     quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id passed the health gate, but the pointers could not be moved"
     swap_pending=
