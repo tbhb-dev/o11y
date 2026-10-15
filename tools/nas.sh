@@ -44,13 +44,13 @@
 #                          loopback ports on the host (3000, 4317, 4318)
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
 #
-# Output is variable names, release ids and pass or fail lines. What the
-# remote commands print goes to tmp/deploy/<task>.log, which is private.
-# Where a task shows remote output, such as versions, the serve
-# configuration, container logs or an SSH error, it first replaces the
-# deployment's paths, names and tailnet addresses with placeholders.
-# deploy-plan and grafana-password are the only tasks that print private
-# values.
+# Output is variable names, release ids and pass or fail lines. Everything
+# a task prints goes to tmp/deploy/<task>.log, and the remote diagnostics it
+# keeps out of sight go to tmp/deploy/<task>.raw.log. Both are private.
+# Everything a task prints, such as versions, the serve configuration,
+# container logs or an SSH error, has the deployment's paths, names and
+# tailnet addresses replaced with placeholders first. deploy-plan and
+# grafana-password are the only tasks that print private values.
 # Never add `set -x`: the commands hold deployment paths.
 set -euo pipefail
 umask 077
@@ -73,6 +73,7 @@ grafana_port=${O11Y_GRAFANA_PORT:-3000}
 grpc_port=${O11Y_OTLP_GRPC_PORT:-4317}
 http_port=${O11Y_OTLP_HTTP_PORT:-4318}
 log=/dev/null
+diagnostics_log=/dev/null
 locked=0
 gate_release=
 swap_pending=
@@ -144,18 +145,23 @@ q() {
 # appends while it binds, passes the 104-byte limit on a socket's path. Here
 # it is $HOME plus 51 bytes, which fits any HOME under 36, and no other user
 # can plant a directory in its way, as one could under a fixed name in /tmp.
+# The connection master can outlive the task, so ssh gets no descriptor
+# beyond the standard three: the cleanup descriptor would hold the output open.
 remote_stdin() {
   [[ -d $HOME/.ssh ]] || mkdir -m 700 "$HOME/.ssh"
   ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$HOME/.ssh/o11y-%C" \
-    -- "$O11Y_SSH_HOST" "$1"
+    -- "$O11Y_SSH_HOST" "$1" 9>&-
 }
 
 remote() {
   remote_stdin "$1" </dev/null
 }
 
+# quiet <command...>: the command's output to the diagnostics log, a
+# regular file, so no reader can fail it or hold it open, and its status
+# is its own.
 quiet() {
-  "$@" >>"$log" 2>&1
+  "$@" >>"$diagnostics_log" 2>&1
 }
 
 # compose_cmd <project> <release dir> <env file> <compose file>...
@@ -187,18 +193,10 @@ attempt_cmd() {
   echo "echo $1 >$dir/attempt.new && mv $dir/attempt.new $dir/attempt"
 }
 
-# The two pointer moves. Each is a rename over the old link, so a reader
-# sees the old target or the new one and never a missing link.
-previous_cmd() {
-  echo "cd $dir && ln -sfn releases/$1 previous.new && mv -T previous.new previous"
-}
-
-current_cmd() {
-  echo "cd $dir && ln -sfn releases/$1 current.new && mv -T current.new current"
-}
-
-# swap_cmd <new current> <new previous or nothing>: both pointer moves in
-# one remote command. Both new links exist before either rename, and the
+# swap_cmd <new current> <new previous or nothing>: the pointer moves of a
+# deploy or a rollback, in one remote command. Each is a rename over the old
+# link, so a reader sees the old target or the new one and never a missing
+# link. Both new links exist before either rename, and the
 # remote shell finishes the two renames even when the local side dies or
 # the connection drops, since it has no terminal to lose.
 swap_cmd() {
@@ -250,7 +248,9 @@ cleanup() {
     # has looked at the two pointers.
     # shellcheck disable=SC2086 # two ids
     set -- $swap_pending
-    echo "FAIL $task: the pointer swap may not have finished, so the lock stays. On the host, current should name release $1 and previous release ${2:-none}. Check both links in O11Y_REMOTE_DIR, set them to those releases if they differ, then remove .deploy.lock" >&9
+    local expected="current should name release $1 and previous release ${2:-}"
+    [[ -n ${2:-} && ${2:-} != "$1" ]] || expected="current should name release $1, and previous stays as it was"
+    echo "FAIL $task: the pointer swap may not have finished, so the lock stays. On the host, $expected. Check the links in O11Y_REMOTE_DIR, set them to match, then remove .deploy.lock" >&9
     ((status != 0)) || status=1
   elif [[ $locked -eq 1 ]]; then
     if ((status >= 128)); then
@@ -284,14 +284,10 @@ redact() {
     -e 's/fd7a:115c:a1e[0]:[0-9a-fA-F:]*/<tailnet address>/g'
 }
 
-# shown <remote command>: runs it, keeps the raw output in the task log and
-# prints it redacted.
+# shown <remote command>: runs it with its errors on its output, which the
+# task log keeps and the operator sees redacted.
 shown() {
-  local out status=0
-  out=$(remote "$1" 2>&1) || status=$?
-  printf '%s\n' "--- $1" "$out" >>"$log"
-  [[ -z $out ]] || redact <<<"$out"
-  return "$status"
+  remote "$1" 2>&1
 }
 
 # promoted <pointer>: the release id the pointer names, or nothing.
@@ -483,7 +479,9 @@ http_status() {
 }
 
 is_ready() {
-  [[ $(http_status "$1" "$2") == 200 ]]
+  local code
+  code=$(http_status "$1" "$2") || return 1
+  [[ $code == 200 ]]
 }
 
 # all_ready <project>: prints the first thing that is not ready and fails.
@@ -493,7 +491,10 @@ all_ready() {
     echo "the containers of $1 did not all come up healthy"
     return 1
   }
-  rustfs=$(container_of "$1" rustfs)
+  rustfs=$(container_of "$1" rustfs) || {
+    echo "the containers of $1 could not be listed"
+    return 1
+  }
   for service in "${services[@]}"; do
     poll "$timeout" is_ready "$rustfs" "$(ready_url "$service")" || {
       echo "$service is not ready"
@@ -506,10 +507,10 @@ all_ready() {
 # the stack's network.
 receipt() {
   local rustfs
-  rustfs=$(container_of "$1" rustfs)
+  rustfs=$(container_of "$1" rustfs) || return 1
   shift
   O11Y_CHECK_CURL="bash tools/nas.sh in-network-curl $rustfs" O11Y_CHECK_OTLP_URL=http://alloy:4318 \
-    O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null
+    O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null 9>&-
 }
 
 # health_gate <project> [receipt.sh arguments...]
@@ -521,7 +522,7 @@ health_gate() {
     return 1
   }
   receipt "$project" ${1+"$@"} || {
-    echo "FAIL $task: the receipt check failed; see $log" >&2
+    echo "FAIL $task: the receipt check failed; see $diagnostics_log" >&2
     return 1
   }
 }
@@ -551,17 +552,18 @@ fs_type_cmd() {
 preflight() {
   local failed=0 version
   # fact <required|noted> <label> <summary> <remote command>: the raw output
-  # goes to the log. The summary is `text` for the redacted output, `lines`
-  # for a count of its lines, or `serve` for whether a configuration exists.
+  # goes to the diagnostics log. The summary is `text` for the redacted
+  # output, `lines` for a count of its lines, or `serve` for whether a
+  # configuration exists.
   fact() {
     local out status=ok summary
     out=$(remote "$4" 2>&1) || status=FAIL
-    printf '%s\n' "--- $2" "$out" >>"$log"
+    printf '%s\n' "--- $2" "$out" >>"$diagnostics_log"
     [[ $status == ok || $1 == required ]] || status=note
     case $3 in
     text) summary=$(redact <<<"$out" | tr '\n' ' ') ;;
-    lines) summary="$(grep -c . <<<"$out" || true) line(s); listed in $log" ;;
-    serve) if grep -q 'No serve config' <<<"$out"; then summary=none; else summary="configured; shown in $log"; fi ;;
+    lines) summary="$(grep -c . <<<"$out" || true) line(s); listed in $diagnostics_log" ;;
+    serve) if grep -q 'No serve config' <<<"$out"; then summary=none; else summary="configured; shown in $diagnostics_log"; fi ;;
     esac
     echo "$status $task: $2${summary:+: ${summary% }}"
     [[ $status != FAIL ]] || failed=1
@@ -623,8 +625,7 @@ deploy_plan() {
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
     echo "$docker exec -i <rustfs container> curl ...    # readiness of each service, then the receipt check"
-    echo "$(previous_cmd '<the release current names>')    # skipped on a first deploy"
-    current_cmd "$id"
+    echo "$(swap_cmd "$id" '<the release current names>')    # on a first deploy, only current"
     echo "rmdir $dir/.deploy.lock"
   } | sed 's/^/  /'
 }
@@ -642,13 +643,13 @@ deploy() {
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
-    [[ -z $current || $current == "$id" ]] || quiet remote "$(previous_cmd "$current")" ||
-      die "$task: the previous pointer could not be moved; current still names release $current"
-    quiet remote "$(current_cmd "$id")" || die "$task: the current pointer could not be moved"
+    swap_pending="$id $current"
+    quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id passed the health gate, but the pointers could not be moved"
+    swap_pending=
     ok "$task: release $id passed the health gate and is now current"
     return
   fi
-  echo "FAIL $task: release $id was not promoted and is left as it is for inspection; see $log" >&2
+  echo "FAIL $task: release $id was not promoted and is left as it is for inspection; see $diagnostics_log" >&2
   if [[ -n $current ]]; then
     echo "To return to release $current, the last one that passed: O11Y_CONFIRM=rollback mise run rollback" >&2
   else
@@ -667,7 +668,7 @@ rollback() {
   id=$(promoted "$pointer")
   [[ -n $id ]] || die "$task: there is no $pointer release on the host"
   [[ $pointer == current ]] || current=$(promoted current)
-  quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $log"
+  quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $diagnostics_log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
   if [[ $pointer == previous ]]; then
     swap_pending="$id $current"
@@ -683,7 +684,7 @@ down() {
   local id
   id=$(active)
   quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env.validate compose.yaml) down" ||
-    die "$task: down failed; see $log"
+    die "$task: down failed; see $diagnostics_log"
   ok "$task: the containers of release $id are removed. Data, secrets, config and images are untouched"
 }
 
@@ -733,7 +734,7 @@ grafana_password() {
 serve() {
   local out
   out=$(remote "$tailscale serve $*" 2>&1) && return
-  echo "$out" >>"$log"
+  echo "$out" >>"$diagnostics_log"
   grep -qiE 'access denied|permission denied|operator' <<<"$out" || return 1
   die "$task: the SSH user may not change the serve configuration. The owner has to set an operator user on the host once, as root (tailscale set --operator=<user>), then run this task again"
 }
@@ -742,7 +743,7 @@ serve_apply() {
   local mapping
   for mapping in "svc:grafana --https=443 http://127.0.0.1:$grafana_port" \
     "svc:otlp --https=4318 http://127.0.0.1:$http_port" "svc:otlp --https=4317 http://127.0.0.1:$grpc_port"; do
-    serve "--service=$mapping" || die "$task: tailscale refused a mapping; its message is in $log"
+    serve "--service=$mapping" || die "$task: tailscale refused a mapping; its message is in $diagnostics_log"
   done
   shown "$tailscale serve status"
 }
@@ -752,12 +753,12 @@ serve_apply() {
 serve_clear() {
   local service failed=0
   for service in svc:grafana svc:otlp; do
-    serve "drain $service" || echo "note $task: $service could not be drained; see $log"
+    serve "drain $service" || echo "note $task: $service could not be drained; see $diagnostics_log"
   done
   for service in svc:grafana svc:otlp; do
     serve "clear $service" || failed=1
   done
-  [[ $failed -eq 0 ]] || die "$task: a service could not be cleared; see $log"
+  [[ $failed -eq 0 ]] || die "$task: a service could not be cleared; see $diagnostics_log"
   shown "$tailscale serve status"
 }
 
@@ -776,13 +777,13 @@ smoke_remote() {
   export O11Y_CHECK_CURL=curl O11Y_CHECK_OTLP_URL=https://$name:4318
   export O11Y_CHECK_GRAFANA_URL=https://grafana.$O11Y_TAILNET_DOMAIN
   case ${1:-} in
-  '') tools/receipt.sh ;;
+  '') tools/receipt.sh 9>&- ;;
   --grpc)
     load_model
     address=$(resolve "$name") || true
     [[ $address =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "$task: the OTLP service name does not resolve on this machine"
     tools/receipt.sh --grpc -- docker run --rm --add-host "$name:$address" "$(image_of telemetrygen)" \
-      traces --otlp-endpoint "$name:4317"
+      traces --otlp-endpoint "$name:4317" 9>&-
     ;;
   *) die "$task: unknown argument" ;;
   esac
@@ -814,7 +815,7 @@ telemetrygen /telemetrygen --help
 s3probe /usr/local/bin/aws --version"
 
 gate_test() {
-  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status
+  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code
   id=$(new_release_id)
   out=tmp/deploy/gate-$id
   release=$dir/gate/releases/$id
@@ -846,14 +847,14 @@ gate_test() {
 
   while read -r service binary flag; do
     quiet remote "$docker run --rm --network none --entrypoint $binary $(image_of "$service") $flag" ||
-      die "$task: the $service image's own binary does not run on this host; see $log"
+      die "$task: the $service image's own binary does not run on this host; see $diagnostics_log"
   done <<<"$gate_binaries"
   ok "$task: the binary of each of the eight images runs on the host's kernel"
 
   # Made only now, after the check above and right before the probe's init
   # first mounts it. See data_cmd.
   quiet remote "mkdir -m 755 $data" || die "$task: the gate data directory could not be created"
-  if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null; then
+  if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null 9>&-; then
     if remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) logs --no-color --no-log-prefix rustfs" 2>&1 |
       grep -qi 'unsupported filesystem'; then
       die "$task: RustFS refused to start on the filesystem under the gate data directory ($facts). This is its unsupported-filesystem guard, not a fault in the probe"
@@ -861,7 +862,7 @@ gate_test() {
     die "$task: the RustFS probe failed"
   fi
 
-  quiet remote "$main up -d" || die "$task: up failed; see $log"
+  quiet remote "$main up -d" || die "$task: up failed; see $diagnostics_log"
   health_gate o11y-gate --state-file "$out/receipt" --grpc -- bash tools/nas.sh remote-compose -p o11y-gate \
     --env-file "$release/.env" -f "$release/compose.yaml" -f "$release/compose.tools.yaml" \
     run --rm -T telemetrygen traces --otlp-endpoint alloy:4317 --otlp-insecure ||
@@ -884,11 +885,11 @@ gate_test() {
   rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
-    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$log" | tr -d '\r')
+    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$diagnostics_log" | tr -d '\r') || return 1
     [[ $count =~ ^[0-9]+$ && $count -ge 1 ]]
   }
-  [[ $(http_status "$rustfs" -X POST http://loki:3100/flush) == 204 ]] || die "$task: Loki's flush endpoint failed"
-  [[ $(http_status "$rustfs" -X POST http://mimir:8080/ingester/flush) == 204 ]] || die "$task: Mimir's flush endpoint failed"
+  code=$(http_status "$rustfs" -X POST http://loki:3100/flush) && [[ $code == 204 ]] || die "$task: Loki's flush endpoint failed"
+  code=$(http_status "$rustfs" -X POST http://mimir:8080/ingester/flush) && [[ $code == 204 ]] || die "$task: Mimir's flush endpoint failed"
   poll 120 has_objects loki || die "$task: the loki bucket is empty after a flush"
   poll 120 has_objects mimir-blocks || die "$task: the mimir-blocks bucket is empty after a flush"
   # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
@@ -896,11 +897,11 @@ gate_test() {
   quiet remote "$main rm -sf loki" || die "$task: loki could not be removed"
   quiet remote "$(util_cmd "$data/loki" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of loki could not be emptied"
   quiet remote "$main up -d loki" || die "$task: loki could not be created again"
-  all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after loki was recreated"
+  all_ready o11y-gate >>"$diagnostics_log" || die "$task: the stack did not come back after loki was recreated"
   receipt o11y-gate --recheck "$out/receipt" || die "$task: loki lost the receipt once its local state was emptied"
   for service in tempo mimir; do
     quiet remote "$main restart $service" || die "$task: $service did not restart"
-    all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after $service restarted"
+    all_ready o11y-gate >>"$diagnostics_log" || die "$task: the stack did not come back after $service restarted"
     receipt o11y-gate --recheck "$out/receipt" || die "$task: the receipt is gone after restarting $service"
   done
   ok "$task: the three buckets hold objects, Loki returns the receipt from its bucket alone, Tempo and Mimir keep it across a restart"
@@ -929,8 +930,8 @@ gate_clean() {
   esac
   load_model
   quiet remote "$(util_cmd "$dir/gate" 'find /d -mindepth 1 -maxdepth 1 -exec rm -rf {} +')" ||
-    die "$task: the gate directory could not be emptied; see $log"
-  quiet remote "rmdir $dir/gate" || die "$task: the emptied gate directory could not be removed; see $log"
+    die "$task: the gate directory could not be emptied; see $diagnostics_log"
+  quiet remote "rmdir $dir/gate" || die "$task: the emptied gate directory could not be removed; see $diagnostics_log"
   ok "$task: the gate directory is removed, and nothing else"
 }
 
@@ -964,6 +965,48 @@ preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-
   ;;
 esac
 
+# filtered <task> [arguments]: runs the task as a child whose stdout and
+# stderr are appended to the task log, a regular file, which no descriptor
+# a leftover process holds can block and which no signal can lose. The
+# child runs in the foreground, so a signal reaches it, its own cleanup
+# decides what stays on the host, and its status, 128 and up for a signal,
+# is what this shell exits with. Once it has ended, this shell shows the
+# operator a redacted copy of the task log from where this run began. A
+# copy that can't be shown fails a run that otherwise passed.
+filtered() {
+  local start status
+  start=$(($(wc -c <"$log") + 1))
+  echo "running $task; the raw output is in $log, the remote diagnostics in $diagnostics_log"
+  # This shell only waits; the child handles a signal.
+  trap : INT TERM
+  set +e
+  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >>"$log" 2>&1
+  status=$?
+  if ! tail -c "+$start" "$log" | redact; then
+    echo "FAIL $task: the output could not be shown; the raw output is in $log" >&2
+    ((status != 0)) || status=1
+  fi
+  exit "$status"
+}
+
+# What a task prints, SSH errors included, reaches the operator only
+# through redact. Two tasks print unfiltered: deploy-plan shows the owner
+# the real values a deploy will use, which is what the owner approves, and
+# grafana-password prints the one password by design.
+case $task in
+deploy-plan | grafana-password) ;;
+*)
+  log=tmp/deploy/$task.log
+  diagnostics_log=tmp/deploy/$task.raw.log
+  if [[ -z ${O11Y_NAS_FILTERED:-} ]]; then
+    mkdir -p tmp/deploy
+    : >>"$log"
+    : >>"$diagnostics_log"
+    filtered "$@"
+  fi
+  ;;
+esac
+
 case $task in
 preflight) need host dir docker compose tailscale ports ;;
 deploy-plan) need dir docker compose domain ports ;;
@@ -976,16 +1019,12 @@ smoke-remote) need domain ;;
 grafana-password) need host docker ;;
 esac
 
-if [[ $task != smoke-remote && $task != grafana-password ]]; then
+if [[ $task == deploy-plan ]]; then
   mkdir -p tmp/deploy
   log=tmp/deploy/$task.log
+  diagnostics_log=$log
   : >"$log"
 fi
-# The tasks that show remote output send all of it, remote and SSH
-# diagnostics included, through redact; the raw text goes to the task log.
-case $task in
-preflight | status | logs | serve-apply | serve-status | serve-clear) exec > >(tee -a "$log" | redact) 2>&1 ;;
-esac
 exec 9>&2
 trap cleanup EXIT
 trap 'exit 130' INT

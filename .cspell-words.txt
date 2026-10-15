@@ -47,6 +47,7 @@ readlink
 rumdl
 rustfs
 rustfsadmin
+setpgrp
 sharder
 shellcheck
 shfmt
