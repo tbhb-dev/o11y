@@ -34,6 +34,7 @@ inmemory
 kvstore
 lockfiles
 memberlist
+mkfifo
 mktemp
 multitenancy
 objstore
@@ -47,6 +48,7 @@ readlink
 rumdl
 rustfs
 rustfsadmin
+setpgrp
 sharder
 shellcheck
 shfmt

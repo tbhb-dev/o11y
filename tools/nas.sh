@@ -43,6 +43,7 @@
 #   O11Y_GRAFANA_PORT, O11Y_OTLP_GRPC_PORT, O11Y_OTLP_HTTP_PORT
 #                          loopback ports on the host (3000, 4317, 4318)
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
+#   O11Y_DRAIN_TIMEOUT     seconds the output may take to drain after a task (10)
 #
 # Output is variable names, release ids and pass or fail lines. What the
 # remote commands print goes to tmp/deploy/<task>.log, which is private.
@@ -137,11 +138,13 @@ q() {
   printf '%s' "${out# }"
 }
 
-# One multiplexed connection per run, so the agent signs once.
+# One multiplexed connection per run, so the agent signs once. The
+# connection master can outlive the task, so ssh gets no descriptor beyond
+# the standard three: the cleanup descriptor would hold the output open.
 remote_stdin() {
   local tmp=${TMPDIR:-/tmp}
   ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=${tmp%/}/o11y-%C" \
-    -- "$O11Y_SSH_HOST" "$1"
+    -- "$O11Y_SSH_HOST" "$1" 9>&-
 }
 
 remote() {
@@ -497,7 +500,7 @@ receipt() {
   rustfs=$(container_of "$1" rustfs)
   shift
   O11Y_CHECK_CURL="bash tools/nas.sh in-network-curl $rustfs" O11Y_CHECK_OTLP_URL=http://alloy:4318 \
-    O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null
+    O11Y_CHECK_GRAFANA_URL=http://grafana:3000 quiet tools/receipt.sh ${1+"$@"} </dev/null 9>&-
 }
 
 # health_gate <project> [receipt.sh arguments...]
@@ -744,13 +747,13 @@ smoke_remote() {
   export O11Y_CHECK_CURL=curl O11Y_CHECK_OTLP_URL=https://$name:4318
   export O11Y_CHECK_GRAFANA_URL=https://grafana.$O11Y_TAILNET_DOMAIN
   case ${1:-} in
-  '') tools/receipt.sh ;;
+  '') tools/receipt.sh 9>&- ;;
   --grpc)
     load_model
     address=$(resolve "$name") || true
     [[ $address =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "$task: the OTLP service name does not resolve on this machine"
     tools/receipt.sh --grpc -- docker run --rm --add-host "$name:$address" "$(image_of telemetrygen)" \
-      traces --otlp-endpoint "$name:4317"
+      traces --otlp-endpoint "$name:4317" 9>&-
     ;;
   *) die "$task: unknown argument" ;;
   esac
@@ -818,7 +821,7 @@ gate_test() {
   done <<<"$gate_binaries"
   ok "$task: the binary of each of the eight images runs on the host's kernel"
 
-  if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null; then
+  if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null 9>&-; then
     if remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) logs --no-color --no-log-prefix rustfs" 2>&1 |
       grep -qi 'unsupported filesystem'; then
       die "$task: RustFS refused to start on the filesystem under the gate data directory ($facts). This is its unsupported-filesystem guard, not a fault in the probe"
@@ -929,13 +932,55 @@ preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-
   ;;
 esac
 
+# kill_tree <pid>: the process and everything it started.
+kill_tree() {
+  local child
+  for child in $(pgrep -P "$1" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill -KILL "$1" 2>/dev/null || true
+}
+
+# filtered <task> [arguments]: runs the task as a child whose output goes
+# through redact, the raw text to the task log, and exits with its status.
+# The child runs in the foreground, so a signal reaches it, its own cleanup
+# decides what stays on the host, and its status, 128 and up for a signal,
+# is what this shell exits with. The filter reads a named pipe and ignores
+# INT and TERM, so it keeps draining through that cleanup. Once the child has ended, the filter gets
+# O11Y_DRAIN_TIMEOUT seconds (10) to finish. A process the task left
+# behind can still hold the pipe open; the filter is then stopped and the
+# run fails, since the output may be incomplete.
+filtered() {
+  local fifo=tmp/deploy/.$task.fifo filter status deadline
+  rm -f "$fifo"
+  mkfifo -m 600 "$fifo"
+  (
+    trap '' INT TERM
+    tee -a "$log" <"$fifo" | redact
+  ) &
+  filter=$!
+  # This shell only waits; the child handles a signal.
+  trap : INT TERM
+  set +e
+  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >"$fifo" 2>&1
+  status=$?
+  deadline=$((SECONDS + ${O11Y_DRAIN_TIMEOUT:-10}))
+  while kill -0 "$filter" 2>/dev/null && ((SECONDS < deadline)); do
+    sleep 0.2
+  done
+  if kill -0 "$filter" 2>/dev/null; then
+    kill_tree "$filter"
+    echo "FAIL $task: a process the task started still held the output open, so what it printed may be incomplete; see $log" >&2
+    ((status != 0)) || status=1
+  fi
+  wait "$filter" 2>/dev/null
+  rm -f "$fifo"
+  exit "$status"
+}
+
 # Everything a task prints, remote and SSH diagnostics included, goes
-# through redact, and the raw text goes to the task log. The task runs as a
-# child whose output is piped through the filter; this shell waits for the
-# whole pipeline, so nothing is lost when the task ends, and exits with the
-# task's status. The filter ignores INT and TERM so it outlives the task's
-# own cleanup. Two tasks print unfiltered: deploy-plan shows the owner the
-# real values a deploy will use, which is what the owner approves, and
+# through redact. Two tasks print unfiltered: deploy-plan shows the owner
+# the real values a deploy will use, which is what the owner approves, and
 # grafana-password prints the one password by design.
 case $task in
 deploy-plan | grafana-password) ;;
@@ -944,13 +989,7 @@ deploy-plan | grafana-password) ;;
   if [[ -z ${O11Y_NAS_FILTERED:-} ]]; then
     mkdir -p tmp/deploy
     : >"$log"
-    trap : INT TERM
-    set +e
-    O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" 2>&1 | (
-      trap '' INT TERM
-      tee -a "$log" | redact
-    )
-    exit "${PIPESTATUS[0]}"
+    filtered "$@"
   fi
   ;;
 esac

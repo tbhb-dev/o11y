@@ -57,8 +57,30 @@ if [ -n "${STUB_SIGNAL_ON:-}" ]; then
   # shellcheck disable=SC2254
   case $command in $STUB_SIGNAL_ON) kill -TERM "$PPID" ;; esac
 fi
+# STUB_HOLD_ON (a glob) marks the moment and holds the command three
+# seconds, long enough for a test to signal the task while it runs.
+if [ -n "${STUB_HOLD_ON:-}" ]; then
+  # shellcheck disable=SC2254
+  case $command in $STUB_HOLD_ON) : >"$STUB/held" && sleep 3 ;; esac
+fi
 sh -c "$command"
 status=$?
+# STUB_LEAK_ON (a glob) leaves a process behind after the command, the way
+# an SSH connection master can. With STUB_LEAK_KIND=fd9 it keeps only the
+# descriptors beyond the standard three; with stdout it keeps stdout.
+if [ -n "${STUB_LEAK_ON:-}" ]; then
+  # shellcheck disable=SC2254
+  case $command in
+  $STUB_LEAK_ON)
+    if [ "${STUB_LEAK_KIND:-}" = stdout ]; then
+      sleep 30 </dev/null 2>/dev/null &
+    else
+      sleep 30 </dev/null >/dev/null 2>&1 &
+    fi
+    echo $! >>"$STUB/leaked-processes"
+    ;;
+  esac
+fi
 if [ -n "${STUB_CORRUPT:-}" ]; then
   case $command in
   *"tar -xpf"*"$STUB_CORRUPT"*)
@@ -238,6 +260,9 @@ STUB
 }
 
 teardown() {
+  if [ -f "$dir/leaked-processes" ]; then
+    xargs kill <"$dir/leaked-processes" 2>/dev/null || true
+  fi
   rm -rf "$dir"
 }
 
@@ -1312,4 +1337,53 @@ two_deploys() {
   [ "$status" -eq 0 ]
   [[ $output == *"https://grafana.sentinel-net.example.ts.net/"* ]] || false
   [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
+}
+
+# --- draining ---------------------------------------------------------------
+
+# in_own_group <command...>: runs the command in a process group of its own
+# in the background, so a test can signal that whole group without bats.
+in_own_group() {
+  perl -e 'setpgrp(0, 0); exec @ARGV' "$@" &
+}
+
+wait_for() {
+  local tries=0
+  until [ -e "$1" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 100 ] || return 1
+    sleep 0.1
+  done
+}
+
+@test "a TERM sent to the task's whole process group fails the run, and its last output still arrives" {
+  healthy o11y
+  go deploy
+  STUB_HOLD_ON="*compose.yaml down" O11Y_CONFIRM=down in_own_group bash "$repo/tools/nas.sh" down >"$dir/terminal" 2>&1
+  pid=$!
+  wait_for "$dir/held"
+  kill -TERM -- "-$pid"
+  set +e
+  wait "$pid"
+  code=$?
+  set -e
+  [ "$code" -eq 143 ]
+  grep -q "interrupted, so the lock stays" "$dir/terminal"
+  [ -d "$remote/.deploy.lock" ]
+}
+
+@test "a process the task leaves behind with an extra descriptor can't hold the run open" {
+  healthy o11y
+  STUB_LEAK_ON="rmdir*" STUB_LEAK_KIND=fd9 O11Y_CONFIRM=deploy run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" deploy
+  [ "$status" -eq 0 ]
+  [[ $output == *"is now current"* ]] || false
+}
+
+@test "output a leftover process holds open is cut off after the drain timeout, and the run fails" {
+  healthy o11y
+  go deploy
+  O11Y_DRAIN_TIMEOUT=2 STUB_LEAK_ON="*logs --no-color*" STUB_LEAK_KIND=stdout run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" logs
+  [ "$status" -eq 1 ]
+  [[ $output == *"GF_SERVER_ROOT_URL"* ]] || false
+  [[ $output == *"still held the output open"* ]] || false
 }
