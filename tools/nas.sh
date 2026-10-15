@@ -43,6 +43,8 @@
 #   O11Y_GRAFANA_PORT, O11Y_OTLP_GRPC_PORT, O11Y_OTLP_HTTP_PORT
 #                          loopback ports on the host (3000, 4317, 4318)
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
+#   O11Y_HOST_NAME         the host's name, stamped on the stack's own OTLP
+#                          metrics; private, and optional
 #   O11Y_DISK_RESERVE_GB   free space preflight, gate-test and deploy require
 #                          under O11Y_REMOTE_DIR, in GiB (50), on top of 10
 #                          percent of the filesystem
@@ -277,14 +279,15 @@ cleanup() {
 # placeholders, and tailnet addresses become <tailnet address>. The raw
 # output stays in the task log.
 redact() {
-  local line entry entries=() private='<private>'
+  local line entry entries=() private='<private>' node=${O11Y_HOST_NAME:-}
   # shellcheck disable=SC2016 # the placeholders are the variable names
-  local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST'
+  local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST' node_name='$O11Y_HOST_NAME'
   IFS=, read -r -a entries <<<"${O11Y_PRIVATE_STRINGS:-}"
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z ${O11Y_REMOTE_DIR:-} ]] || line=${line//"$O11Y_REMOTE_DIR"/$dir_name}
     [[ -z ${O11Y_TAILNET_DOMAIN:-} ]] || line=${line//"$O11Y_TAILNET_DOMAIN"/$domain_name}
     [[ -z ${O11Y_SSH_HOST:-} ]] || line=${line//"$O11Y_SSH_HOST"/$host_name}
+    [[ ${#node} -lt 4 ]] || line=${line//"$node"/$node_name}
     for entry in ${entries[@]+"${entries[@]}"}; do
       [[ ${#entry} -lt 4 ]] || line=${line//"$entry"/$private}
     done
@@ -337,6 +340,8 @@ render_release() {
     unset O11Y_SECRETS_OWNER
     export O11Y_DATA_DIR=$3 O11Y_GRAFANA_ROOT_URL=$4
     export O11Y_GRAFANA_PORT=$5 O11Y_OTLP_GRPC_PORT=$6 O11Y_OTLP_HTTP_PORT=$7
+    # The deployment.environment.name the stack stamps on its own metrics.
+    if [[ $project == o11y-gate ]]; then export O11Y_ENVIRONMENT=gate; else export O11Y_ENVIRONMENT=production; fi
     tools/render.sh "$out" --config-root "$dir/config"
   ) || die "$task: render failed"
   for file in compose.yaml compose.init.yaml compose.tools.yaml; do

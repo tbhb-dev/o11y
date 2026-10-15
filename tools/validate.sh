@@ -174,10 +174,27 @@ else
   failed=1
 fi
 
+# The self path: its exporter's queue is bounded in items, and its
+# receiver accepts no gRPC.
+self_path=$(sed -n '/^otelcol.receiver.otlp "self"/,/^}/p; /^otelcol.exporter.otlphttp "mimir_self"/,/^}/p' "$(config_dir ALLOY)/config.alloy")
+if grep -qE '^\t\tsizer += "items"$' <<<"$self_path" && grep -qE '^\t\tqueue_size += [0-9]+$' <<<"$self_path" && ! grep -q 'grpc' <<<"$self_path"; then
+  ok "alloy: the self receiver is HTTP only, and its exporter's queue is bounded in items"
+else
+  echo "FAIL alloy: the self receiver takes gRPC, or its exporter's queue is not bounded in items" >&2
+  failed=1
+fi
+
 if jq -e '.services.alloy | (.environment.GOMEMLIMIT | length > 0) and (.stop_grace_period | length > 0)' <<<"$model" >/dev/null; then
   ok "alloy: the container sets GOMEMLIMIT and a stop grace period"
 else
   echo "FAIL alloy: the container lacks GOMEMLIMIT or stop_grace_period" >&2
+  failed=1
+fi
+
+if jq -e '[.services[].ports[]?.target] | index(4320) == null' <<<"$model" >/dev/null; then
+  ok "alloy: the self receiver on 4320 is not published"
+else
+  echo "FAIL alloy: the self receiver on 4320 is published" >&2
   failed=1
 fi
 

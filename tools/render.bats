@@ -109,10 +109,11 @@ mode() {
   local dashboard=$root/config/grafana/dashboards/stack-health.json expected actual
   expected=$(awk '/^  [a-z0-9-]+:$/ { service = substr($1, 1, length($1) - 1) }
     /^    mem_limit: / { n = $2 + 0; u = substr($2, length($2)); print service, n * (u == "g" ? 1073741824 : 1048576) }' "$root/compose.yaml" |
-    grep -E '^(alloy|grafana|loki|mimir|tempo) ' | sort)
+    grep -E '^(alloy|grafana|loki|mimir|rustfs|tempo) ' | sort)
   actual=$(jq -r '.panels[] | select(.title == "Resident memory against mem_limit") | .targets[].expr' "$dashboard" |
-    sed -E 's#^process_resident_memory_bytes\{job="o11y/([a-z]+)"\} / ([0-9]+)$#\1 \2#' | sort)
-  [ "$(wc -l <<<"$expected")" -eq 5 ]
+    sed -E -e 's#^process_resident_memory_bytes\{job="o11y/([a-z]+)"\} / ([0-9]+)$#\1 \2#' \
+      -e 's#^max\(rustfs_system_process_resident_memory_bytes\{job="o11y/(rustfs)"\}\) / ([0-9]+)$#\1 \2#' | sort)
+  [ "$(wc -l <<<"$expected")" -eq 6 ]
   [ "$actual" = "$expected" ]
   expected=$(awk -F'"' '/"job" = / { job = $8 } /^\tsample_limit / { sub(/.*= */, ""); print job, $0 }' "$root/config/alloy/config.alloy" | sort)
   actual=$(jq -r '.panels[] | select(.title == "Scraped samples against sample_limit") | .targets[].expr' "$dashboard" |

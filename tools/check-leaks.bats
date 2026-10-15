@@ -48,7 +48,7 @@ no_value() {
 # that none of them appears in the output, so redaction is tested in every
 # case, not only in the ones that remember to.
 secrets=(zebra-host-01 /zq/stash/dir /zq/bin/tsc quokka-pond 203.0.113.77 kestrel99
-  mango-secret wombat-site 10.1.2.3 100.100.1.2 100.64.0.9 100.127.255.1 fd7a:115c:a1e0
+  mango-secret wombat-site wombat-node 10.1.2.3 100.100.1.2 100.64.0.9 100.127.255.1 fd7a:115c:a1e0
   172.16.0.5 172.31.9.9 192.168.1.1 other-example box.other-net foo.ts.net)
 
 no_secrets() {
@@ -95,6 +95,16 @@ run_check() {
     [[ $output == *"leak.md:2: private literal $name"* ]]
     no_value "$value"
   done
+}
+
+@test "the host name stamped on the stack's metrics is a private literal" {
+  export O11Y_HOST_NAME=wombat-node
+  printf 'host wombat-node\n' >leak.md
+  git add leak.md
+  run_check
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.md:1: private literal O11Y_HOST_NAME"* ]]
+  no_value wombat-node
 }
 
 @test "a cluster name the owner sets is a private literal, and the default is not" {

@@ -254,7 +254,7 @@ version) echo 1.104.1 ;;
 "serve status")
   if [ -n "${STUB_SERVE_CONFIG:-}" ]; then
     # What a configured host shows: its names and tailnet addresses.
-    echo "https://grafana.$O11Y_TAILNET_DOMAIN (tailnet only) on $O11Y_SSH_HOST"
+    echo "https://grafana.$O11Y_TAILNET_DOMAIN (tailnet only) on $O11Y_SSH_HOST ${O11Y_HOST_NAME:-}"
     echo "|-- / proxy http://127.0.0.1:3000 at 100.$((64 + 37)).2.3 and fd7a:115c:a1e""0::1 $O11Y_PRIVATE_STRINGS"
   else
     echo "No serve config"
@@ -1819,4 +1819,24 @@ STUB
   [[ $output == *"FAIL gate-test: up is not 1 for exactly the five o11y/* jobs"* ]] || false
   recorded "-p o11y-gate --env-file"
   [ "$(grep -c "down --remove-orphans" "$dir/ssh.log")" -ge 2 ]
+}
+
+# --- stack identity -------------------------------------------------------
+
+@test "stage renders production as the environment and gate-test renders gate" {
+  healthy o11y-gate
+  layout
+  go stage
+  [ "$status" -eq 0 ]
+  grep -qx 'O11Y_ENVIRONMENT=production' "$repo/tmp/deploy/$(staged)/release/.env"
+  go gate-test
+  [ "$status" -eq 0 ]
+  grep -qx 'O11Y_ENVIRONMENT=gate' "$(find "$repo/tmp/deploy" -path '*/gate-*/release/.env' | head -n 1)"
+}
+
+@test "the host name stamped on the stack's metrics is redacted from task output" {
+  O11Y_HOST_NAME=wombat-node STUB_SERVE_CONFIG=1 nas serve-status
+  [ "$status" -eq 0 ]
+  [[ $output != *wombat-node* ]] || false
+  [[ $output == *'$O11Y_HOST_NAME'* ]] || false
 }

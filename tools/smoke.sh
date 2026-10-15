@@ -25,6 +25,7 @@ isolate_environment
 O11Y_DATA_DIR=$(test_data_dir smoke)
 export O11Y_DATA_DIR O11Y_GRAFANA_ROOT_URL=$grafana/
 export O11Y_GRAFANA_PORT=13000 O11Y_OTLP_GRPC_PORT=14317 O11Y_OTLP_HTTP_PORT=14318
+export O11Y_ENVIRONMENT=smoke O11Y_HOST_NAME=smoke-host
 # Compose itself reads s3.env, so the invoking user has to own it.
 O11Y_SECRETS_OWNER=$(id -u):$(id -g)
 export O11Y_SECRETS_OWNER
@@ -389,6 +390,32 @@ main start alloy >/dev/null 2>&1 || die "7: alloy could not be started again"
 wait_ready alloy
 poll 180 all_up || die "7: the five jobs are not up again once Tempo and Alloy are back"
 ok "7: a stopped Tempo reads Down with no error count, and a stopped Alloy turns every status panel Unavailable or Stale"
+
+# RustFS pushes its metrics to Alloy's unpublished self receiver. They
+# arrive as job o11y/rustfs with the stack's identity, only under the
+# allowlisted names, and never as traces or logs. RustFS's own start lines
+# still reach its stdout, which step 2 and the host's gate read, and
+# nothing but JSON log lines follows them: no exporter dump.
+rustfs_pushed() {
+  mimir_query 'rustfs_start_total{job="o11y/rustfs"}' |
+    jq -e '.data.result | length == 1 and (.[0].metric | .instance == "rustfs:9000" and .namespace == "o11y" and .cluster == "o11y")' >/dev/null
+}
+poll 120 rustfs_pushed || die "7: RustFS's metrics did not arrive as o11y/rustfs with the instance, namespace and cluster labels"
+mimir_query 'target_info{job="o11y/rustfs"}' |
+  jq -e '.data.result | length == 1 and (.[0].metric | .host_name == "smoke-host" and .deployment_environment_name == "smoke" and has("rustfs_node") == false and has("network_local_address") == false)' >/dev/null ||
+  die "7: RustFS's resource does not carry the release's host and environment, or still carries its node identity"
+allowlist=$(sed -n '/^otelcol.processor.filter "self"/,/^}/p' config/alloy/config.alloy | grep -oE '"rustfs_[a-z0-9_]+"' | tr -d '"' | sort)
+sent=$(curl -s -m 15 -G --data-urlencode 'match[]={job="o11y/rustfs"}' "$grafana/api/datasources/proxy/uid/mimir/api/v1/series" |
+  jq -r '.data[].__name__' | sed -E 's/_(bucket|sum|count)$//' | grep -vx target_info | sort -u)
+[[ -n $sent && -z $(comm -13 <(echo "$allowlist") <(echo "$sent")) ]] || die "7: RustFS sent a metric outside the allowlist"
+[[ $(curl -s -m 15 -G --data-urlencode 'q={resource.service.name="rustfs"}' "$grafana/api/datasources/proxy/uid/tempo/api/search" | jq '.traces | length') -eq 0 ]] ||
+  die "7: RustFS sent traces"
+[[ $(curl -s -m 15 -G --data-urlencode 'query={service_name="rustfs"}' --data-urlencode "start=$(($(date +%s) - 3600))000000000" \
+  "$grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range" | jq '.data.result | length') -eq 0 ]] || die "7: RustFS sent logs over OTLP"
+main logs --no-log-prefix rustfs 2>&1 | rustfs_log_ok || die "7: RustFS's start lines are no longer on its stdout"
+[[ $(main logs --no-log-prefix rustfs 2>&1 | tr -d '\r' | sed -n '/^Starting: /,$p' | sed 1d | grep -vc '^{') -eq 0 ]] ||
+  die "7: RustFS printed something other than JSON log lines, such as an exporter dump"
+ok "7: RustFS's allowlisted metrics arrive as o11y/rustfs with the stack's identity, no traces or logs, and its stdout keeps the start lines"
 
 # 8. A release only recreates what changed. The same tree rendered again
 # must leave every container alone. One changed byte in Loki's config must

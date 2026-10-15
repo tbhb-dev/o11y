@@ -67,6 +67,7 @@ tonumber
 toplevel
 traceid
 urandom
+urlencode
 vendir
 venv
 worktree

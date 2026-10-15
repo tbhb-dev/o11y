@@ -10,7 +10,10 @@
 # Client load is telemetrygen at 50 items a second per signal through the
 # published ports. During the outage, the receipt check for traces and logs
 # must pass at 1, 3 and 5 minutes, and once Mimir is back, the one for
-# metrics. No container may be OOM-killed or restarted. A helper container
+# metrics. No container may be OOM-killed or restarted. This run's copy of
+# the Alloy config shrinks the self exporter's queue to 200 items, so the
+# outage overflows it: Alloy must count the RustFS points it could not
+# queue, while the client receipts still pass. A helper container
 # that mounts /sys/fs/cgroup read-only records each container's raw cgroup v2
 # memory files every 5 seconds, so the engine must run on Linux with cgroup
 # v2, as Docker Desktop's VM does.
@@ -108,9 +111,21 @@ receipt() {
   tools/receipt.sh --signals "$1"
 }
 
+mimir_query() {
+  curl -s -m 15 -G --data-urlencode "query=$1" "$grafana/api/datasources/proxy/uid/mimir/api/v1/query"
+}
+
+rustfs_pushed() {
+  mimir_query 'rustfs_start_total{job="o11y/rustfs"}' | jq -e '.data.result | length == 1' >/dev/null
+}
+
 rm -rf "$out"
 mkdir -p "$out"
 tools/render.sh "$work" >/dev/null
+alloy_config=$(grep '^O11Y_CONFIG_ALLOY=' "$release/.env" | cut -d= -f2-)/config.alloy
+sed -i.orig '/^otelcol.exporter.otlphttp "mimir_self"/,/^}/s/queue_size = [0-9]*/queue_size = 200/' "$alloy_config"
+! cmp -s "$alloy_config" "$alloy_config.orig" || die "the self exporter's queue could not be shrunk for this run"
+rm "$alloy_config.orig"
 model=$("$O11Y_COMPOSE" -p "$project" --profile tools --env-file "$release/.env.validate" \
   -f "$release/compose.yaml" -f "$release/compose.tools.yaml" -f "$release/compose.init.yaml" config --format json)
 util_image=$(jq -er '.services.init.image' <<<"$model")
@@ -128,6 +143,7 @@ for service in "${services[@]}"; do
   wait_ready "$service"
 done
 check "the receipt check passes on the healthy stack" receipt traces,logs,metrics
+check "RustFS's metrics arrive through the shrunk self queue on the healthy stack" poll 120 rustfs_pushed
 
 # Raw cgroup v2 files of every container, every 5 seconds, as one
 # tab-separated line each: time, service, memory.current, memory.peak, anon,
@@ -178,6 +194,11 @@ sleep $((stopped + outage - SECONDS > 0 ? stopped + outage - SECONDS : 0))
 main start mimir >/dev/null 2>&1 || die "mimir could not be started again"
 wait_ready mimir
 check "Mimir is back: the receipt check passes for metrics" receipt metrics
+self_overflowed() {
+  mimir_query 'max_over_time(otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy", component_id="otelcol.exporter.otlphttp.mimir_self"}[15m])' |
+    jq -e '.data.result | length == 1 and (.[0].value[1] | tonumber) > 0' >/dev/null
+}
+check "the shrunk self queue overflowed during the outage, and Alloy counted the points it could not queue" poll 180 self_overflowed
 sleep 60
 
 for signal in traces logs metrics; do

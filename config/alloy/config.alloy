@@ -177,3 +177,112 @@ prometheus.remote_write "mimir" {
 		truncate_frequency = "30m"
 	}
 }
+
+// The stack's own OTLP metrics, from RustFS, which serves no Prometheus
+// endpoint. HTTP on 4320 only and never published, so only the stack's own
+// network reaches it. Its memory limiter sits below the client one, so the
+// self path refuses first, and its exporter has a queue of its own, bounded
+// in items, so a backlog here fills that queue rather than the client ones.
+otelcol.receiver.otlp "self" {
+	http {
+		endpoint = "0.0.0.0:4320"
+	}
+
+	output {
+		metrics = [otelcol.processor.memory_limiter.self.input]
+	}
+}
+
+otelcol.processor.memory_limiter "self" {
+	check_interval = "1s"
+	limit          = "320MiB"
+
+	output {
+		metrics = [otelcol.processor.filter.self.input]
+	}
+}
+
+// An allowlist of metric names: start, readiness, process memory, HTTP and
+// S3 traffic and failures, capacity, and drive health and errors. RustFS
+// 1.0.1 sends about 2000 series on an idle stack. Dropping attributes
+// without aggregating would collide datapoint identities, so this bounds
+// the series by name only, and the dashboard shows their count.
+otelcol.processor.filter "self" {
+	error_mode = "ignore"
+
+	metrics {
+		metric = [`not IsMatch(name, "^(` + string.join([
+			"rustfs_start_total",
+			"rustfs_runtime_readiness_ready",
+			"rustfs_system_process_start_time_seconds",
+			"rustfs_system_process_resident_memory_bytes",
+			"rustfs_http_server_requests_total",
+			"rustfs_http_server_failures_total",
+			"rustfs_http_server_request_duration_seconds",
+			"rustfs_s3_operations_total",
+			"rustfs_cluster_capacity_usable_total_bytes",
+			"rustfs_cluster_capacity_free_bytes",
+			"rustfs_cluster_health_drives_online",
+			"rustfs_cluster_health_drives_offline",
+			"rustfs_system_drive_availability_errors_total",
+			"rustfs_system_drive_timeout_errors_total",
+		], "|") + `)$")`]
+	}
+
+	output {
+		metrics = [otelcol.processor.transform.self.input]
+	}
+}
+
+// Identity: job o11y/rustfs, instance rustfs:9000, and the host and
+// environment from the release, whatever RustFS reports. RustFS's node
+// identity and local address are dropped. namespace and cluster also go on
+// each datapoint, so the series carry them as labels.
+otelcol.processor.transform "self" {
+	error_mode = "ignore"
+
+	metric_statements {
+		context    = "resource"
+		statements = [
+			`set(attributes["service.namespace"], "o11y")`,
+			`set(attributes["service.instance.id"], "rustfs:9000")`,
+			`delete_key(attributes, "network.local.address")`,
+			`delete_key(attributes, "rustfs.node")`,
+			string.format(`set(attributes["host.name"], %q)`, sys.env("O11Y_HOST_NAME")),
+			string.format(`set(attributes["deployment.environment.name"], %q)`, sys.env("O11Y_ENVIRONMENT")),
+		]
+	}
+
+	metric_statements {
+		context    = "datapoint"
+		statements = [
+			`set(attributes["namespace"], "o11y")`,
+			string.format(`set(attributes["cluster"], %q)`, sys.env("O11Y_CLUSTER")),
+		]
+	}
+
+	output {
+		metrics = [otelcol.processor.batch.self.input]
+	}
+}
+
+otelcol.processor.batch "self" {
+	timeout             = "5s"
+	send_batch_size     = 1000
+	send_batch_max_size = 2000
+
+	output {
+		metrics = [otelcol.exporter.otlphttp.mimir_self.input]
+	}
+}
+
+otelcol.exporter.otlphttp "mimir_self" {
+	client {
+		endpoint = "http://mimir:8080/otlp"
+	}
+
+	sending_queue {
+		sizer      = "items"
+		queue_size = 20000
+	}
+}

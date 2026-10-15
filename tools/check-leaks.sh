@@ -134,6 +134,9 @@ else
   add_needle "O11Y_TAILNET_DOMAIN (first label)" "${O11Y_TAILNET_DOMAIN%%.*}"
 fi
 
+# The host's own name, stamped on the stack's metrics, is optional.
+add_needle O11Y_HOST_NAME "${O11Y_HOST_NAME-}"
+
 # The cluster label is a site name only when the owner sets one. Its
 # default, o11y, is this project's own name and appears everywhere.
 if [[ -n ${O11Y_CLUSTER-} && $O11Y_CLUSTER != o11y ]]; then
