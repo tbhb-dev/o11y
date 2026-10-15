@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
-# tools/check-curl-fail.sh on small scripts: a curl whose body something
-# reads must use --fail, or report its status through -w, or be allowed with
-# a reason.
+# tools/check-curl-fail.sh on small scripts: every curl carries a fail
+# option as an argument of its own, or an allow comment with a reason on the
+# line before.
 
 setup() {
   dir=$(mktemp -d)
@@ -17,55 +17,69 @@ script() {
   printf '%s\n' '#!/usr/bin/env bash' "$@" >"$dir/t.sh"
 }
 
-@test "a curl piped into jq without --fail fails and names the line" {
+@test "a curl piped into jq without a fail option fails and names the line" {
   script 'x=1' 'curl -s "$url" | jq -r .uid'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
-  [[ $output == "$dir/t.sh:3: curl output is read without --fail"* ]]
+  [[ $output == "$dir/t.sh:3: curl without a fail option"* ]]
 }
 
-@test "a curl inside a command substitution without --fail fails" {
+@test "a curl inside a command substitution fails" {
   script 'body=$(curl -sS -m 15 "$url")'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
 }
 
-@test "a curl inside a test fails, the way a remote smoke check once passed on a timed-out curl" {
-  script '[[ $(curl -sS -m 15 "$url" | jq -r .redirectUri) == /d/* ]] || exit 1'
+@test "a curl on its own line inside a multi-line substitution fails" {
+  script 'body=$(' '  curl -sS -m 15 "$url" |' '    jq -r .status' ')'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:3:"* ]]
+}
+
+@test "a curl in a function whose output is captured later fails" {
+  script 'fetch() {' '  curl -s "$1"' '}' 'body=$(fetch "$url")'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:3:"* ]]
+}
+
+@test "a curl that writes a file jq reads afterwards fails" {
+  script 'curl -s "$url" >"$out"' 'jq -r .status "$out"'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
 }
 
-@test "a pipe continued on the next line still counts" {
-  script 'curl -sS -m 10 http://mimir:8080/metrics |' "  awk '{ n += \$NF } END { print n + 0 }'"
+@test "a fail option on a continued line counts, and its absence still fails" {
+  script 'curl -s -m 15 "$url" \' '  -f | jq -r .status' 'curl -s -m 15 "$url" \' '  --data "q=up" | jq -r .status'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
-  [[ $output == "$dir/t.sh:2:"* ]]
+  [ "$output" = "$dir/t.sh:4: curl without a fail option; add -f, or put # lint-curl: allow <reason> on the line before" ]
 }
 
-@test "arguments continued with a backslash still count" {
-  script 'curl -s -m 15 "$url" \' '  --data "query=up" | jq -r .status'
-  run bash "$check" "$dir/t.sh"
-  [ "$status" -eq 1 ]
-}
-
-@test "-f, --fail, --fail-with-body and a bundle with f pass" {
-  script 'a=$(curl -f "$url")' 'b=$(curl --fail "$url")' 'c=$(curl --fail-with-body "$url")' 'curl -fsSL "$url" | sh'
+@test "-f, --fail, --fail-with-body, a bundle with f and a quoted '--fail' pass" {
+  script 'a=$(curl -f "$url")' 'b=$(curl --fail "$url")' 'c=$(curl --fail-with-body "$url")' 'curl -fsSL "$url" | sh' "d=\$(curl '--fail' \"\$url\")" 'e="$(curl -s "--fail" "$url")"'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
 }
 
-@test "a status code read through -w passes" {
-  script "code=\$(curl -s -o /dev/null -w '%{http_code}' -m 10 \"\$url\")"
+@test "--fail inside a quoted header is not a fail option" {
+  script "curl -s -H 'X-Mode: --fail ' \"\$url\" | jq ."
   run bash "$check" "$dir/t.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
 }
 
-@test "a curl whose output nothing reads passes" {
-  script 'curl -s -o "$file" "$url"' 'curl -s "$url" >/dev/null' 'curl -s "$url" || true'
+@test "%{http_code} inside a URL exempts nothing" {
+  script 'curl -s "$url/%{http_code}" | jq .'
   run bash "$check" "$dir/t.sh"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
+}
+
+@test "-w '%{http_code}' alone exempts nothing; it takes an allow comment" {
+  script "code=\$(curl -s -o /dev/null -w '%{http_code}' \"\$url\")"
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
 }
 
 @test "an -f that belongs to the next command does not count" {
@@ -74,18 +88,24 @@ script() {
   [ "$status" -eq 1 ]
 }
 
-@test "names that merely contain curl pass" {
-  script 'curl_cmd=(curl)' 'x=$(bash tools/nas.sh in-network-curl "$id" | jq .)' 'O11Y_CHECK_CURL=curl tools/receipt.sh'
+@test "names that merely contain curl, and curl inside a quoted string, pass" {
+  script 'x=$(bash tools/nas.sh in-network-curl "$id" | jq .)' 'O11Y_CHECK_CURL=curl tools/receipt.sh' 'remote "docker exec -i $id curl -s $url"'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 0 ]
+}
+
+@test "an apostrophe in a comment or a heredoc doesn't hide the next curl" {
+  script "# it doesn't matter" 'cat <<EOF' "it's text" 'EOF' 'curl -s "$url" | jq .'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:6:"* ]]
 }
 
 @test "an allow comment with a reason exempts the next command only" {
   script '# lint-curl: allow the body is an error page we assert on' 'body=$(curl -s "$url")' 'again=$(curl -s "$url")'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
-  [[ $output == "$dir/t.sh:4:"* ]]
-  [[ $output != *"t.sh:3:"* ]]
+  [ "$output" = "$dir/t.sh:4: curl without a fail option; add -f, or put # lint-curl: allow <reason> on the line before" ]
 }
 
 @test "an allow comment without a reason exempts nothing" {

@@ -112,6 +112,7 @@ rustfs_log_ok() {
 expect_status() {
   local want=$1 got
   shift
+  # lint-curl: allow the status code is the answer, compared with the wanted one below
   got=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@") || {
     echo "request failed before any status arrived" >&2
     return 1

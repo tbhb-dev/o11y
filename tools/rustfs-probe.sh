@@ -123,6 +123,7 @@ else
 fi
 
 ready() {
+  # lint-curl: allow the status code is the answer, which output_is compares with 200
   output_is 200 main exec -T rustfs curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready
 }
 
@@ -134,6 +135,7 @@ ok "1: start log is clean and reports the console off"
 
 # curl exits 7 when nothing accepts the connection.
 status=0
+# lint-curl: allow the exit status is the answer, and only 7 passes
 main exec -T rustfs curl -s -o /dev/null -m 5 http://127.0.0.1:9001/ || status=$?
 [[ $status -eq 7 ]] || die "2: something answers on the console port"
 ok "2: ready on 9000 and nothing listens on 9001"

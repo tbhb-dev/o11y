@@ -71,6 +71,7 @@ cleanup() {
 # In-network request from the rustfs container, which has curl. The backends
 # publish no ports and their images have no HTTP client.
 inside() {
+  # lint-curl: allow the status code is the answer, which every caller compares through output_is
   main exec -T rustfs curl -s -o /dev/null -w '%{http_code}' -m 10 "$@"
 }
 
@@ -99,6 +100,7 @@ wait_ready() {
 
 # Status code of a request to Grafana with no credentials.
 grafana_status() {
+  # lint-curl: allow the status code is the answer, which every caller compares through output_is
   curl -s -o /dev/null -w '%{http_code}' -m 15 "$@"
 }
 
