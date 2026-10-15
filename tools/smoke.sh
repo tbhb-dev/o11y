@@ -259,12 +259,22 @@ printf 'user = "admin:%s"\n' admin | expect_status 403 -K - "$grafana/api/admin/
   die "4: the provisioned datasources are not the expected three"
 [[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
   die "4: the provisioned dashboard is missing"
+# The call deploy makes on every run (home_cmd in tools/nas.sh), until the
+# Grafana pin has the fix for grafana/grafana#131876.
+[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - -X PUT -H 'Content-Type: application/json' \
+  -d '{"homeDashboardUID":"o11y-stack-health"}' "$grafana/api/org/preferences") == 200 ]] ||
+  die "4: the home dashboard could not be set"
+[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | curl -s -m 15 -K - "$grafana/api/org/preferences" | jq -r '.homeDashboardUID') == o11y-stack-health ]] ||
+  die "4: the org preferences do not name the provisioned dashboard as home"
+# An anonymous user gets the org preferences, so its home is that dashboard.
+[[ $(curl -s -m 15 "$grafana/api/dashboards/home" | jq -r '.redirectUri') == /d/o11y-stack-health/* ]] ||
+  die "4: the anonymous home is not the provisioned dashboard"
 main logs --no-log-prefix grafana >"$out/grafana.log" 2>&1 || die "4: the Grafana log could not be read"
 # A log without provisioning lines would pass the error check vacuously.
 grep -qi 'provisioning' "$out/grafana.log" || die "4: the Grafana log shows no provisioning at all"
 ! grep -i 'provisioning' "$out/grafana.log" | grep -qiE 'level=(error|warn)' ||
   die "4: the Grafana log has a provisioning error"
-ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, provisioning is clean"
+ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, the home dashboard is set, provisioning is clean"
 
 # 5. Exact receipt of one trace, log and metric over OTLP/HTTP, plus one
 # trace over gRPC. Both go through the published ports. A container reaches
