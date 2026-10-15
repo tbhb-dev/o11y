@@ -804,7 +804,7 @@ resolve() {
 }
 
 smoke_remote() {
-  local name=otlp.$O11Y_TAILNET_DOMAIN address
+  local name=otlp.$O11Y_TAILNET_DOMAIN address home
   export O11Y_CHECK_CURL=curl O11Y_CHECK_OTLP_URL=https://$name:4318
   export O11Y_CHECK_GRAFANA_URL=https://grafana.$O11Y_TAILNET_DOMAIN
   case ${1:-} in
@@ -818,9 +818,11 @@ smoke_remote() {
     ;;
   *) die "$task: unknown argument" ;;
   esac
-  # What an anonymous user gets as home; see home_cmd.
-  [[ $(curl -sS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -r '.redirectUri') == /d/o11y-stack-health/* ]] ||
-    die "$task: the anonymous home is not the Stack health dashboard"
+  # What an anonymous user gets as home; see home_cmd. The assignment keeps
+  # the pipeline's status, so a curl or jq that fails after printing fails.
+  home=$(curl -sS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -er '.redirectUri') ||
+    die "$task: the anonymous home could not be read"
+  [[ $home == /d/o11y-stack-health/* ]] || die "$task: the anonymous home is not the Stack health dashboard"
   ok "$task: the anonymous home is the Stack health dashboard"
 }
 

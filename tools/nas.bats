@@ -110,6 +110,10 @@ STUB
   stub "$dir/bin/curl" <<'STUB'
 printf '%s\n' "$*" >>"$STUB/curl.log"
 printf '{"redirectUri":"%s"}' "${STUB_HOME_REDIRECT-/d/o11y-stack-health/stack-health}"
+# STUB_CURL_TRAILER follows the answer with more output, STUB_CURL_EXIT ends
+# with that status, as a timeout after the body would.
+printf '%s' "${STUB_CURL_TRAILER:-}"
+exit "${STUB_CURL_EXIT:-0}"
 STUB
   # The pinned Compose, with its calls recorded. nas.sh clears the
   # environment for it, so the paths are written into the stub.
@@ -1151,9 +1155,26 @@ STUB
 }
 
 @test "smoke-remote fails when the anonymous home is not the Stack health dashboard" {
-  STUB_HOME_REDIRECT= nas smoke-remote
+  STUB_HOME_REDIRECT=/d/other/other nas smoke-remote
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL smoke-remote: the anonymous home is not the Stack health dashboard"* ]] || false
+  STUB_HOME_REDIRECT= nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
+}
+
+@test "smoke-remote fails when curl answers with the right home and then fails" {
+  STUB_CURL_EXIT=28 nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL smoke-remote: the anonymous home could not be read"* ]] || false
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
+}
+
+@test "smoke-remote fails when the right home is followed by output that isn't JSON" {
+  STUB_CURL_TRAILER='}garbage' nas smoke-remote
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL smoke-remote: the anonymous home could not be read"* ]] || false
+  [[ $output != *"ok smoke-remote: the anonymous home"* ]] || false
 }
 
 # --- plumbing -------------------------------------------------------------
