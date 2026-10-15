@@ -138,10 +138,15 @@ q() {
   printf '%s' "${out# }"
 }
 
-# One multiplexed connection per run, so the agent signs once.
+# One multiplexed connection per run, so the agent signs once. The socket
+# lives in ~/.ssh, which is the user's own, rather than under TMPDIR: macOS's
+# TMPDIR is long enough that the socket's path, with the 17 characters ssh
+# appends while it binds, passes the 104-byte limit on a socket's path. Here
+# it is $HOME plus 51 bytes, which fits any HOME under 36, and no other user
+# can plant a directory in its way, as one could under a fixed name in /tmp.
 remote_stdin() {
-  local tmp=${TMPDIR:-/tmp}
-  ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=${tmp%/}/o11y-%C" \
+  [[ -d $HOME/.ssh ]] || mkdir -m 700 "$HOME/.ssh"
+  ssh -o BatchMode=yes -o ControlMaster=auto -o ControlPersist=10m -o "ControlPath=$HOME/.ssh/o11y-%C" \
     -- "$O11Y_SSH_HOST" "$1"
 }
 

@@ -854,6 +854,26 @@ $t serve status" ]
   [[ $output == *"FAIL preflight: sudo -n runs docker-compose"* ]]
 }
 
+@test "the SSH control socket stays under the socket path limit however long TMPDIR is" {
+  mv "$dir/bin/ssh" "$dir/bin/ssh.stub"
+  stub "$dir/bin/ssh" <<'STUB'
+printf '%s\n' "$@" | sed -n 's/^ControlPath=//p' >>"$STUB/control-paths"
+exec "$STUB/bin/ssh.stub" "$@"
+STUB
+  long=$dir/$(printf 'tmp%.0s' {1..40})
+  mkdir "$long"
+  TMPDIR=$long nas preflight
+  [ "$status" -eq 0 ]
+  path=$(sort -u "$dir/control-paths")
+  [ "$(wc -l <<<"$path")" -eq 1 ]
+  [[ $path != "$long"* ]] || false
+  # %C expands to 40 hex digits, and ssh appends 17 characters while it
+  # binds the socket.
+  expanded=${path//%C/0123456789abcdef0123456789abcdef01234567}
+  ((${#expanded} + 17 < 104)) || false
+  [ -d "$(dirname "$path")" ]
+}
+
 @test "status reports the current release and readiness without changing anything" {
   healthy o11y
   go deploy
