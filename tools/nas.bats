@@ -72,11 +72,11 @@ if [ -n "${STUB_LEAK_ON:-}" ]; then
   # shellcheck disable=SC2254
   case $command in
   $STUB_LEAK_ON)
-    if [ "${STUB_LEAK_KIND:-}" = stdout ]; then
-      sleep 30 </dev/null 2>/dev/null &
-    else
-      sleep 30 </dev/null >/dev/null 2>&1 &
-    fi
+    case ${STUB_LEAK_KIND:-} in
+    stdout) sleep 30 </dev/null 2>/dev/null & ;;
+    stderr) sleep 30 </dev/null >/dev/null & ;;
+    *) sleep 30 </dev/null >/dev/null 2>&1 & ;;
+    esac
     echo $! >>"$STUB/leaked-processes"
     ;;
   esac
@@ -196,6 +196,10 @@ case $all in
   [ "$(wc -l <"$STUB/fail-second.count")" -ne 2 ] || exit 1
   ;;
 esac
+# STUB_NOISY makes down print a lot, as a real one does on a slow host.
+case $all in
+*" down"*) [ -z "${STUB_NOISY:-}" ] || seq 1 5000 | sed 's/^/Container stopping /' ;;
+esac
 case $all in
 *" config"*) case $all in *" -q"*) ;; *) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;; esac ;;
 *"version --short"*) echo v2.20.1-stub ;;
@@ -240,6 +244,24 @@ echo "rustfs-probe.sh $*" >>"$STUB/tools.log"
 [ -z "${STUB_PROBE_FAIL:-}" ]
 STUB
 
+  # STUB_RAW_SED_DIES ends the prefixing diagnostics writer of an earlier version
+  # at once, and STUB_GREP_FAILS makes its line filter fail; the current
+  # script uses neither, and must not care.
+  stub "$dir/bin/sed" <<'STUB'
+case "$*" in *'raw| '*) [ -z "${STUB_RAW_SED_DIES:-}" ] || exit 0 ;; esac
+exec "$STUB_SED" "$@"
+STUB
+  stub "$dir/bin/grep" <<'STUB'
+case "$*" in
+*'^raw| '*)
+  if [ -n "${STUB_GREP_FAILS:-}" ]; then
+    cat >/dev/null
+    exit 2
+  fi
+  ;;
+esac
+exec "$STUB_GREP" "$@"
+STUB
   # STUB_TAIL_FAILS makes tail fail, so the operator's copy of the output
   # can't be shown.
   stub "$dir/bin/tail" <<'STUB'
@@ -248,7 +270,9 @@ exec "$STUB_TAIL" "$@"
 STUB
   STUB_TAR=$(command -v tar)
   STUB_TAIL=$(command -v tail)
-  export STUB=$dir STUB_TAR STUB_TAIL PATH="$dir/bin:$PATH"
+  STUB_SED=$(command -v sed)
+  STUB_GREP=$(command -v grep)
+  export STUB=$dir STUB_TAR STUB_TAIL STUB_SED STUB_GREP PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
@@ -1445,10 +1469,33 @@ wait_for() {
   grep -q "current should name release $(staged) and previous release $first" "$repo/tmp/deploy/deploy.log"
 }
 
-@test "remote diagnostics stay in the task log and out of the operator's copy" {
+@test "remote diagnostics go to their own log and stay out of the operator's copy" {
   nas preflight
   [ "$status" -eq 0 ]
-  grep -q '^raw| --- SSH reaches the host' "$repo/tmp/deploy/preflight.log"
-  [[ $output != *"raw| "* ]] || false
+  grep -q -- '--- SSH reaches the host' "$repo/tmp/deploy/preflight.raw.log"
   [[ $output != *"--- SSH reaches the host"* ]] || false
+}
+
+@test "a diagnostics writer that ends early can't fail a remote command or free the lock" {
+  healthy o11y
+  go deploy
+  STUB_RAW_SED_DIES=1 STUB_NOISY=1 go down
+  [ "$status" -eq 0 ]
+  [[ $output == *"containers of release"*"are removed"* ]] || false
+  [ "$(grep -c 'Container stopping' "$repo/tmp/deploy/down.raw.log")" -eq 5000 ]
+}
+
+@test "a leftover process that holds only the diagnostics can't hold gate-test open" {
+  healthy o11y-gate
+  layout
+  STUB_LEAK_ON="*s3probe count*" STUB_LEAK_KIND=stderr O11Y_CONFIRM=gate-test \
+    run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" gate-test
+  [ "$status" -eq 0 ]
+  [[ $output == *"the rehearsal passed"* ]] || false
+}
+
+@test "a line filter that fails can't hide the operator's copy" {
+  STUB_GREP_FAILS=1 nas serve-status
+  [ "$status" -eq 0 ]
+  [[ $output == *"No serve config"* ]] || false
 }

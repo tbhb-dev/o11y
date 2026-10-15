@@ -45,8 +45,8 @@
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
 #
 # Output is variable names, release ids and pass or fail lines. Everything
-# a task prints goes to tmp/deploy/<task>.log, which is private; lines that
-# start "raw| " are remote diagnostics, kept there and never shown.
+# a task prints goes to tmp/deploy/<task>.log, and the remote diagnostics it
+# keeps out of sight go to tmp/deploy/<task>.raw.log. Both are private.
 # Everything a task prints, such as versions, the serve configuration,
 # container logs or an SSH error, has the deployment's paths, names and
 # tailnet addresses replaced with placeholders first. deploy-plan and
@@ -73,6 +73,7 @@ grafana_port=${O11Y_GRAFANA_PORT:-3000}
 grpc_port=${O11Y_OTLP_GRPC_PORT:-4317}
 http_port=${O11Y_OTLP_HTTP_PORT:-4318}
 log=/dev/null
+diagnostics_log=/dev/null
 locked=0
 gate_release=
 swap_pending=
@@ -151,20 +152,11 @@ remote() {
   remote_stdin "$1" </dev/null
 }
 
-# raw: stdin into the task log as diagnostics, which the operator's copy
-# leaves out. It always runs in a child shell, behind a pipe or a process
-# substitution, and ignores INT and TERM there: a signal to the task's
-# process group must not end it while the task still writes to it.
-raw() {
-  trap '' INT TERM
-  sed 's/^/raw| /' >>"$log"
-}
-
-# quiet <command...>: the command's output to the log as diagnostics. The
-# command runs in this shell, not in a pipeline, so it gets this shell's
-# signals and its status is its own.
+# quiet <command...>: the command's output to the diagnostics log, a
+# regular file, so no reader can fail it or hold it open, and its status
+# is its own.
 quiet() {
-  "$@" > >(raw) 2>&1
+  "$@" >>"$diagnostics_log" 2>&1
 }
 
 # compose_cmd <project> <release dir> <env file> <compose file>...
@@ -287,8 +279,8 @@ redact() {
     -e 's/fd7a:115c:a1e[0]:[0-9a-fA-F:]*/<tailnet address>/g'
 }
 
-# shown <remote command>: runs it, keeps the raw output in the task log and
-# prints it redacted.
+# shown <remote command>: runs it with its errors on its output, which the
+# task log keeps and the operator sees redacted.
 shown() {
   remote "$1" 2>&1
 }
@@ -520,7 +512,7 @@ health_gate() {
     return 1
   }
   receipt "$project" ${1+"$@"} || {
-    echo "FAIL $task: the receipt check failed; see $log" >&2
+    echo "FAIL $task: the receipt check failed; see $diagnostics_log" >&2
     return 1
   }
 }
@@ -534,17 +526,18 @@ up_cmd() {
 preflight() {
   local failed=0 version
   # fact <required|noted> <label> <summary> <remote command>: the raw output
-  # goes to the log. The summary is `text` for the redacted output, `lines`
-  # for a count of its lines, or `serve` for whether a configuration exists.
+  # goes to the diagnostics log. The summary is `text` for the redacted
+  # output, `lines` for a count of its lines, or `serve` for whether a
+  # configuration exists.
   fact() {
     local out status=ok summary
     out=$(remote "$4" 2>&1) || status=FAIL
-    printf '%s\n' "--- $2" "$out" | raw
+    printf '%s\n' "--- $2" "$out" >>"$diagnostics_log"
     [[ $status == ok || $1 == required ]] || status=note
     case $3 in
     text) summary=$(redact <<<"$out" | tr '\n' ' ') ;;
-    lines) summary="$(grep -c . <<<"$out" || true) line(s); listed in $log" ;;
-    serve) if grep -q 'No serve config' <<<"$out"; then summary=none; else summary="configured; shown in $log"; fi ;;
+    lines) summary="$(grep -c . <<<"$out" || true) line(s); listed in $diagnostics_log" ;;
+    serve) if grep -q 'No serve config' <<<"$out"; then summary=none; else summary="configured; shown in $diagnostics_log"; fi ;;
     esac
     echo "$status $task: $2${summary:+: ${summary% }}"
     [[ $status != FAIL ]] || failed=1
@@ -627,7 +620,7 @@ deploy() {
     ok "$task: release $id passed the health gate and is now current"
     return
   fi
-  echo "FAIL $task: release $id was not promoted and is left as it is for inspection; see $log" >&2
+  echo "FAIL $task: release $id was not promoted and is left as it is for inspection; see $diagnostics_log" >&2
   if [[ -n $current ]]; then
     echo "To return to release $current, the last one that passed: O11Y_CONFIRM=rollback mise run rollback" >&2
   else
@@ -646,7 +639,7 @@ rollback() {
   id=$(promoted "$pointer")
   [[ -n $id ]] || die "$task: there is no $pointer release on the host"
   [[ $pointer == current ]] || current=$(promoted current)
-  quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $log"
+  quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $diagnostics_log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
   if [[ $pointer == previous ]]; then
     swap_pending="$id $current"
@@ -662,7 +655,7 @@ down() {
   local id
   id=$(active)
   quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env.validate compose.yaml) down" ||
-    die "$task: down failed; see $log"
+    die "$task: down failed; see $diagnostics_log"
   ok "$task: the containers of release $id are removed. Data, secrets, config and images are untouched"
 }
 
@@ -712,7 +705,7 @@ grafana_password() {
 serve() {
   local out
   out=$(remote "$tailscale serve $*" 2>&1) && return
-  echo "$out" | raw
+  echo "$out" >>"$diagnostics_log"
   grep -qiE 'access denied|permission denied|operator' <<<"$out" || return 1
   die "$task: the SSH user may not change the serve configuration. The owner has to set an operator user on the host once, as root (tailscale set --operator=<user>), then run this task again"
 }
@@ -721,7 +714,7 @@ serve_apply() {
   local mapping
   for mapping in "svc:grafana --https=443 http://127.0.0.1:$grafana_port" \
     "svc:otlp --https=4318 http://127.0.0.1:$http_port" "svc:otlp --https=4317 http://127.0.0.1:$grpc_port"; do
-    serve "--service=$mapping" || die "$task: tailscale refused a mapping; its message is in $log"
+    serve "--service=$mapping" || die "$task: tailscale refused a mapping; its message is in $diagnostics_log"
   done
   shown "$tailscale serve status"
 }
@@ -731,12 +724,12 @@ serve_apply() {
 serve_clear() {
   local service failed=0
   for service in svc:grafana svc:otlp; do
-    serve "drain $service" || echo "note $task: $service could not be drained; see $log"
+    serve "drain $service" || echo "note $task: $service could not be drained; see $diagnostics_log"
   done
   for service in svc:grafana svc:otlp; do
     serve "clear $service" || failed=1
   done
-  [[ $failed -eq 0 ]] || die "$task: a service could not be cleared; see $log"
+  [[ $failed -eq 0 ]] || die "$task: a service could not be cleared; see $diagnostics_log"
   shown "$tailscale serve status"
 }
 
@@ -825,7 +818,7 @@ gate_test() {
 
   while read -r service binary flag; do
     quiet remote "$docker run --rm --network none --entrypoint $binary $(image_of "$service") $flag" ||
-      die "$task: the $service image's own binary does not run on this host; see $log"
+      die "$task: the $service image's own binary does not run on this host; see $diagnostics_log"
   done <<<"$gate_binaries"
   ok "$task: the binary of each of the eight images runs on the host's kernel"
 
@@ -837,7 +830,7 @@ gate_test() {
     die "$task: the RustFS probe failed"
   fi
 
-  quiet remote "$main up -d" || die "$task: up failed; see $log"
+  quiet remote "$main up -d" || die "$task: up failed; see $diagnostics_log"
   health_gate o11y-gate --state-file "$out/receipt" --grpc -- bash tools/nas.sh remote-compose -p o11y-gate \
     --env-file "$release/.env" -f "$release/compose.yaml" -f "$release/compose.tools.yaml" \
     run --rm -T telemetrygen traces --otlp-endpoint alloy:4317 --otlp-insecure ||
@@ -860,7 +853,7 @@ gate_test() {
   rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
-    count=$(remote "$tools run --rm -T s3probe count $1" 2> >(raw) | tr -d '\r')
+    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$diagnostics_log" | tr -d '\r')
     [[ $count =~ ^[0-9]+$ && $count -ge 1 ]]
   }
   [[ $(http_status "$rustfs" -X POST http://loki:3100/flush) == 204 ]] || die "$task: Loki's flush endpoint failed"
@@ -872,11 +865,11 @@ gate_test() {
   quiet remote "$main rm -sf loki" || die "$task: loki could not be removed"
   quiet remote "$(util_cmd "$data/loki" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of loki could not be emptied"
   quiet remote "$main up -d loki" || die "$task: loki could not be created again"
-  all_ready o11y-gate | raw || die "$task: the stack did not come back after loki was recreated"
+  all_ready o11y-gate >>"$diagnostics_log" || die "$task: the stack did not come back after loki was recreated"
   receipt o11y-gate --recheck "$out/receipt" || die "$task: loki lost the receipt once its local state was emptied"
   for service in tempo mimir; do
     quiet remote "$main restart $service" || die "$task: $service did not restart"
-    all_ready o11y-gate | raw || die "$task: the stack did not come back after $service restarted"
+    all_ready o11y-gate >>"$diagnostics_log" || die "$task: the stack did not come back after $service restarted"
     receipt o11y-gate --recheck "$out/receipt" || die "$task: the receipt is gone after restarting $service"
   done
   ok "$task: the three buckets hold objects, Loki returns the receipt from its bucket alone, Tempo and Mimir keep it across a restart"
@@ -905,8 +898,8 @@ gate_clean() {
   esac
   load_model
   quiet remote "$(util_cmd "$dir/gate" 'find /d -mindepth 1 -maxdepth 1 -exec rm -rf {} +')" ||
-    die "$task: the gate directory could not be emptied; see $log"
-  quiet remote "rmdir $dir/gate" || die "$task: the emptied gate directory could not be removed; see $log"
+    die "$task: the gate directory could not be emptied; see $diagnostics_log"
+  quiet remote "rmdir $dir/gate" || die "$task: the emptied gate directory could not be removed; see $diagnostics_log"
   ok "$task: the gate directory is removed, and nothing else"
 }
 
@@ -946,19 +939,19 @@ esac
 # child runs in the foreground, so a signal reaches it, its own cleanup
 # decides what stays on the host, and its status, 128 and up for a signal,
 # is what this shell exits with. Once it has ended, this shell shows the
-# operator a redacted copy of what this run appended, diagnostics left out.
-# A copy that can't be shown fails a run that otherwise passed.
+# operator a redacted copy of the task log from where this run began. A
+# copy that can't be shown fails a run that otherwise passed.
 filtered() {
   local start status
   start=$(($(wc -c <"$log") + 1))
-  echo "running $task; the raw log is $log"
+  echo "running $task; the raw output is in $log, the remote diagnostics in $diagnostics_log"
   # This shell only waits; the child handles a signal.
   trap : INT TERM
   set +e
   O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >>"$log" 2>&1
   status=$?
-  if ! tail -c "+$start" "$log" | { grep -v '^raw| ' || true; } | redact; then
-    echo "FAIL $task: the output could not be shown; the raw log is $log" >&2
+  if ! tail -c "+$start" "$log" | redact; then
+    echo "FAIL $task: the output could not be shown; the raw output is in $log" >&2
     ((status != 0)) || status=1
   fi
   exit "$status"
@@ -972,9 +965,11 @@ case $task in
 deploy-plan | grafana-password) ;;
 *)
   log=tmp/deploy/$task.log
+  diagnostics_log=tmp/deploy/$task.raw.log
   if [[ -z ${O11Y_NAS_FILTERED:-} ]]; then
     mkdir -p tmp/deploy
     : >>"$log"
+    : >>"$diagnostics_log"
     filtered "$@"
   fi
   ;;
@@ -995,6 +990,7 @@ esac
 if [[ $task == deploy-plan ]]; then
   mkdir -p tmp/deploy
   log=tmp/deploy/$task.log
+  diagnostics_log=$log
   : >"$log"
 fi
 exec 9>&2
