@@ -432,11 +432,11 @@ stage() {
 
 # staged: the release the last stage produced, when it is of this commit.
 staged() {
-  local id
+  local id commit
   [[ -f tmp/deploy/staged ]] || return 0
   id=$(<tmp/deploy/staged)
-  # shellcheck disable=SC2312 # without a commit the pattern ends in -, which no release id does
-  [[ $id =~ $id_re && $id == *-"$(git rev-parse --short HEAD)" && -d tmp/deploy/$id/release ]] || return 0
+  commit=$(git rev-parse --short HEAD) || return 0
+  [[ $id =~ $id_re && $id == *-"$commit" && -d tmp/deploy/$id/release ]] || return 0
   echo "$id"
 }
 

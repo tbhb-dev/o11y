@@ -114,10 +114,15 @@ container_ids() {
 
 rm -rf "$out"
 mkdir -p "$out"
-# Everything printed from here on is kept for the sentinel search, which
-# fails on an empty transcript.
-# shellcheck disable=SC2312 # tee runs for the rest of the script
-exec > >(tee "$out/transcript.log") 2>&1
+# Everything printed from here on is kept for the sentinel search. tee
+# writes its status once group 10 lets go of it, so a transcript cut short
+# by a write error fails the run instead of passing a search of part of it.
+exec 3>&1 4>&2
+# shellcheck disable=SC2312 # the status of tee goes to transcript.status, which group 10 checks
+exec > >(
+  tee "$out/transcript.log"
+  echo "$?" >"$out/transcript.status"
+) 2>&1
 tools/render.sh "$out"
 
 # The first start happens the way a deploy does it: the models load before
@@ -417,14 +422,17 @@ args) main exec -d -T rustfs sh -c 'while :; do sleep 5; done' "$sentinel_secret
 rendered) echo "$sentinel_secret" >>"$release/.env" ;;
 esac
 for service in "${services[@]}"; do
-  # shellcheck disable=SC2312 # an empty id fails docker top, which ends the run
-  docker top "$(main ps -q "$service")" >>"$out/processes.log"
+  id=$(main ps -q "$service") || die "10: the $service container could not be found"
+  docker top "$id" >>"$out/processes.log"
 done
 main logs --no-color >"$out/containers.log" 2>&1
 # The one sanctioned way to print a resolved model, run here with the real
 # env file named in the environment, which it must ignore.
 O11Y_S3_ENV_FILE=${O11Y_S3_ENV_FILE:-$O11Y_DATA_DIR/secrets/s3.env} tools/validate.sh --model >"$out/model.log" ||
   die "10: the resolved model could not be printed"
+exec 1>&3 2>&4 3>&- 4>&-
+poll 10 test -s "$out/transcript.status" || die "10: the transcript was never finished"
+[[ $(<"$out/transcript.status") == 0 ]] || die "10: the transcript could not be written in full"
 for sentinel in "$sentinel_access" "$sentinel_secret" "$sentinel_password"; do
   sentinel_absent "$sentinel" "the rendered release=$out/release" "the rendered release=$out/again" \
     "the rendered source copy=$out/src" "the rendered config=$out/config" \
