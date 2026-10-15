@@ -14,7 +14,19 @@
       "type": "stat",
       "datasource": { "type": "prometheus", "uid": "mimir" },
       "gridPos": { "h": 6, "w": 24, "x": 0, "y": 0 },
-      "targets": [{ "refId": "A", "expr": "up", "legendFormat": "{{job}}" }]
+      "fieldConfig": {
+        "defaults": { "noValue": "Unavailable" },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{job=~\"alloy|grafana|loki|mimir|tempo\"} and time() - timestamp(up{job=~\"alloy|grafana|loki|mimir|tempo\"}) < 90",
+          "instant": true,
+          "range": false,
+          "legendFormat": "{{job}}"
+        }
+      ]
     },
     {
       "id": 2,
