@@ -34,7 +34,6 @@ inmemory
 kvstore
 lockfiles
 memberlist
-mkfifo
 mktemp
 multitenancy
 objstore

@@ -43,10 +43,10 @@
 #   O11Y_GRAFANA_PORT, O11Y_OTLP_GRPC_PORT, O11Y_OTLP_HTTP_PORT
 #                          loopback ports on the host (3000, 4317, 4318)
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
-#   O11Y_DRAIN_TIMEOUT     seconds the output may take to drain after a task (10)
 #
-# Output is variable names, release ids and pass or fail lines. What the
-# remote commands print goes to tmp/deploy/<task>.log, which is private.
+# Output is variable names, release ids and pass or fail lines. Everything
+# a task prints goes to tmp/deploy/<task>.log, which is private; lines that
+# start "raw| " are remote diagnostics, kept there and never shown.
 # Everything a task prints, such as versions, the serve configuration,
 # container logs or an SSH error, has the deployment's paths, names and
 # tailnet addresses replaced with placeholders first. deploy-plan and
@@ -151,8 +151,17 @@ remote() {
   remote_stdin "$1" </dev/null
 }
 
+# raw: stdin into the task log as diagnostics, which the operator's copy
+# leaves out.
+raw() {
+  sed 's/^/raw| /' >>"$log"
+}
+
+# quiet <command...>: the command's output to the log as diagnostics. The
+# command runs in this shell, not in a pipeline, so it gets this shell's
+# signals and its status is its own.
 quiet() {
-  "$@" >>"$log" 2>&1
+  "$@" > >(raw) 2>&1
 }
 
 # compose_cmd <project> <release dir> <env file> <compose file>...
@@ -278,11 +287,7 @@ redact() {
 # shown <remote command>: runs it, keeps the raw output in the task log and
 # prints it redacted.
 shown() {
-  local out status=0
-  out=$(remote "$1" 2>&1) || status=$?
-  printf '%s\n' "--- $1" "$out" >>"$log"
-  [[ -z $out ]] || redact <<<"$out"
-  return "$status"
+  remote "$1" 2>&1
 }
 
 # promoted <pointer>: the release id the pointer names, or nothing.
@@ -531,7 +536,7 @@ preflight() {
   fact() {
     local out status=ok summary
     out=$(remote "$4" 2>&1) || status=FAIL
-    printf '%s\n' "--- $2" "$out" >>"$log"
+    printf '%s\n' "--- $2" "$out" | raw
     [[ $status == ok || $1 == required ]] || status=note
     case $3 in
     text) summary=$(redact <<<"$out" | tr '\n' ' ') ;;
@@ -704,7 +709,7 @@ grafana_password() {
 serve() {
   local out
   out=$(remote "$tailscale serve $*" 2>&1) && return
-  echo "$out" >>"$log"
+  echo "$out" | raw
   grep -qiE 'access denied|permission denied|operator' <<<"$out" || return 1
   die "$task: the SSH user may not change the serve configuration. The owner has to set an operator user on the host once, as root (tailscale set --operator=<user>), then run this task again"
 }
@@ -852,7 +857,7 @@ gate_test() {
   rustfs=$(container_of o11y-gate rustfs)
   has_objects() {
     local count
-    count=$(remote "$tools run --rm -T s3probe count $1" 2>>"$log" | tr -d '\r')
+    count=$(remote "$tools run --rm -T s3probe count $1" 2> >(raw) | tr -d '\r')
     [[ $count =~ ^[0-9]+$ && $count -ge 1 ]]
   }
   [[ $(http_status "$rustfs" -X POST http://loki:3100/flush) == 204 ]] || die "$task: Loki's flush endpoint failed"
@@ -864,11 +869,11 @@ gate_test() {
   quiet remote "$main rm -sf loki" || die "$task: loki could not be removed"
   quiet remote "$(util_cmd "$data/loki" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of loki could not be emptied"
   quiet remote "$main up -d loki" || die "$task: loki could not be created again"
-  all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after loki was recreated"
+  all_ready o11y-gate | raw || die "$task: the stack did not come back after loki was recreated"
   receipt o11y-gate --recheck "$out/receipt" || die "$task: loki lost the receipt once its local state was emptied"
   for service in tempo mimir; do
     quiet remote "$main restart $service" || die "$task: $service did not restart"
-    all_ready o11y-gate >>"$log" || die "$task: the stack did not come back after $service restarted"
+    all_ready o11y-gate | raw || die "$task: the stack did not come back after $service restarted"
     receipt o11y-gate --recheck "$out/receipt" || die "$task: the receipt is gone after restarting $service"
   done
   ok "$task: the three buckets hold objects, Loki returns the receipt from its bucket alone, Tempo and Mimir keep it across a restart"
@@ -932,82 +937,31 @@ preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-
   ;;
 esac
 
-# kill_tree <pid>: the process and everything it started.
-kill_tree() {
-  local child
-  for child in $(pgrep -P "$1" 2>/dev/null); do
-    kill_tree "$child"
-  done
-  kill -KILL "$1" 2>/dev/null || true
-}
-
-# filtered <task> [arguments]: runs the task as a child whose output goes
-# through redact, the raw text to the task log, and exits with its status.
-#
-# The pipe between them lives in a directory of this run's own, so runs of
-# the same task can't touch each other's. No open of it can block. This
-# shell first opens the pipe for reading and writing, which never waits,
-# and holds that until the filter reports its read end open; only then is
-# the child started. A filter that dies or can't open the pipe fails the
-# run before the task starts.
-#
-# The child runs in the foreground, so a signal reaches it, its own cleanup
+# filtered <task> [arguments]: runs the task as a child whose stdout and
+# stderr are appended to the task log, a regular file, which no descriptor
+# a leftover process holds can block and which no signal can lose. The
+# child runs in the foreground, so a signal reaches it, its own cleanup
 # decides what stays on the host, and its status, 128 and up for a signal,
-# is what this shell exits with. The filter ignores INT and TERM, so it
-# keeps draining through that cleanup. Once the child has ended, the filter
-# gets O11Y_DRAIN_TIMEOUT seconds (10) to finish. A process the task left
-# behind can still hold the pipe open; the filter is then stopped and the
-# run fails, since the output may be incomplete.
+# is what this shell exits with. Once it has ended, this shell shows the
+# operator a redacted copy of what this run appended, diagnostics left out.
+# A copy that can't be shown fails a run that otherwise passed.
 filtered() {
-  local private fifo filter status deadline
-  private=$(mktemp -d tmp/deploy/.filter.XXXXXX)
-  fifo=$private/output
-  if ! mkfifo -m 600 "$fifo" || ! exec 8<>"$fifo"; then
-    rm -rf "$private"
-    echo "FAIL $task: the output filter could not start" >&2
-    exit 1
-  fi
-  (
-    trap '' INT TERM
-    exec <"$fifo"
-    : >"$private/open"
-    tee -a "$log" | redact
-  ) 8<&- &
-  filter=$!
-  exec 7>"$fifo"
-  deadline=$((SECONDS + 10))
-  until [[ -e $private/open ]]; do
-    if ! kill -0 "$filter" 2>/dev/null || ((SECONDS >= deadline)); then
-      kill_tree "$filter"
-      exec 7>&- 8<&-
-      rm -rf "$private"
-      echo "FAIL $task: the output filter could not start" >&2
-      exit 1
-    fi
-    sleep 0.05
-  done
-  exec 8<&-
+  local start status
+  start=$(($(wc -c <"$log") + 1))
+  echo "running $task; the raw log is $log"
   # This shell only waits; the child handles a signal.
   trap : INT TERM
   set +e
-  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >&7 2>&1 7>&-
+  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >>"$log" 2>&1
   status=$?
-  exec 7>&-
-  deadline=$((SECONDS + ${O11Y_DRAIN_TIMEOUT:-10}))
-  while kill -0 "$filter" 2>/dev/null && ((SECONDS < deadline)); do
-    sleep 0.2
-  done
-  if kill -0 "$filter" 2>/dev/null; then
-    kill_tree "$filter"
-    echo "FAIL $task: a process the task started still held the output open, so what it printed may be incomplete; see $log" >&2
+  if ! tail -c "+$start" "$log" | { grep -v '^raw| ' || true; } | redact; then
+    echo "FAIL $task: the output could not be shown; the raw log is $log" >&2
     ((status != 0)) || status=1
   fi
-  wait "$filter" 2>/dev/null
-  rm -rf "$private"
   exit "$status"
 }
 
-# Everything a task prints, remote and SSH diagnostics included, goes
+# What a task prints, SSH errors included, reaches the operator only
 # through redact. Two tasks print unfiltered: deploy-plan shows the owner
 # the real values a deploy will use, which is what the owner approves, and
 # grafana-password prints the one password by design.
@@ -1017,7 +971,7 @@ deploy-plan | grafana-password) ;;
   log=tmp/deploy/$task.log
   if [[ -z ${O11Y_NAS_FILTERED:-} ]]; then
     mkdir -p tmp/deploy
-    : >"$log"
+    : >>"$log"
     filtered "$@"
   fi
   ;;

@@ -240,34 +240,15 @@ echo "rustfs-probe.sh $*" >>"$STUB/tools.log"
 [ -z "${STUB_PROBE_FAIL:-}" ]
 STUB
 
-  # STUB_SLOW_TEE holds tee back a second, the way a busy terminal or a
-  # slow filter would.
-  stub "$dir/bin/tee" <<'STUB'
-[ -z "${STUB_SLOW_TEE:-}" ] || sleep 1
-# STUB_TEE_DIES stops the filter at once, as a filter that crashed would.
-[ -z "${STUB_TEE_DIES:-}" ] || exit 1
-exec "$STUB_TEE" "$@"
-STUB
-  # STUB_SYNC_FIFO makes the first run to create a pipe wait there until a
-  # test says the second run is done. STUB_FIFO_WRITE_ONLY leaves the pipe
-  # writable but not readable, so no reader can open it.
-  stub "$dir/bin/mkfifo" <<'STUB'
-"$STUB_MKFIFO" "$@" || exit
-for last; do :; done
-[ -z "${STUB_FIFO_WRITE_ONLY:-}" ] || chmod 200 "$last"
-if [ -n "${STUB_SYNC_FIFO:-}" ] && [ ! -e "$STUB/fifo-first" ]; then
-  : >"$STUB/fifo-first"
-  tries=0
-  while [ ! -e "$STUB/second-done" ] && [ "$tries" -lt 100 ]; do
-    sleep 0.1
-    tries=$((tries + 1))
-  done
-fi
+  # STUB_TAIL_FAILS makes tail fail, so the operator's copy of the output
+  # can't be shown.
+  stub "$dir/bin/tail" <<'STUB'
+[ -z "${STUB_TAIL_FAILS:-}" ] || exit 1
+exec "$STUB_TAIL" "$@"
 STUB
   STUB_TAR=$(command -v tar)
-  STUB_TEE=$(command -v tee)
-  STUB_MKFIFO=$(command -v mkfifo)
-  export STUB=$dir STUB_TAR STUB_TEE STUB_MKFIFO PATH="$dir/bin:$PATH"
+  STUB_TAIL=$(command -v tail)
+  export STUB=$dir STUB_TAR STUB_TAIL PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
@@ -1323,11 +1304,11 @@ two_deploys() {
 }
 
 @test "all a task prints has reached its output by the time the task exits" {
-  STUB_SLOW_TEE=1 bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
+  bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
   grep -q "No serve config" "$dir/terminal"
   # The exit status is the task's own.
   set +e
-  STUB_SLOW_TEE=1 O11Y_REMOTE_TAILSCALE=tailscale bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
+  O11Y_REMOTE_TAILSCALE=tailscale bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
   code=$?
   set -e
   [ "$code" -eq 1 ]
@@ -1366,7 +1347,8 @@ two_deploys() {
 # in_own_group <command...>: runs the command in a process group of its own
 # in the background, so a test can signal that whole group without bats.
 in_own_group() {
-  perl -e 'setpgrp(0, 0); exec @ARGV' "$@" &
+  # A background job starts with INT ignored; the task needs it back.
+  perl -e '$SIG{INT} = "DEFAULT"; setpgrp(0, 0); exec @ARGV' "$@" &
 }
 
 wait_for() {
@@ -1401,46 +1383,72 @@ wait_for() {
   [[ $output == *"is now current"* ]] || false
 }
 
-@test "output a leftover process holds open is cut off after the drain timeout, and the run fails" {
+@test "an INT sent to the task's whole process group fails the run with 130 and keeps the lock" {
   healthy o11y
   go deploy
-  O11Y_DRAIN_TIMEOUT=2 STUB_LEAK_ON="*logs --no-color*" STUB_LEAK_KIND=stdout run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" logs
-  [ "$status" -eq 1 ]
-  [[ $output == *"GF_SERVER_ROOT_URL"* ]] || false
-  [[ $output == *"still held the output open"* ]] || false
+  STUB_HOLD_ON="*compose.yaml down" O11Y_CONFIRM=down in_own_group bash "$repo/tools/nas.sh" down >"$dir/terminal" 2>&1
+  pid=$!
+  wait_for "$dir/held"
+  kill -INT -- "-$pid"
+  set +e
+  wait "$pid"
+  code=$?
+  set -e
+  [ "$code" -eq 130 ]
+  grep -q "interrupted, so the lock stays" "$dir/terminal"
+  [ -d "$remote/.deploy.lock" ]
 }
 
-@test "two runs of the same task started together both finish with their own output" {
-  STUB_SYNC_FIFO=1 perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status >"$dir/first" 2>&1 &
-  first=$!
-  wait_for "$dir/fifo-first"
-  run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status
-  : >"$dir/second-done"
+@test "a leftover process that holds the task's stdout can't hold the run open" {
+  healthy o11y
+  go deploy
+  STUB_LEAK_ON="*logs --no-color*" STUB_LEAK_KIND=stdout run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" logs
   [ "$status" -eq 0 ]
-  [[ $output == *"No serve config"* ]] || false
-  set +e
+  [[ $output == *"GF_SERVER_ROOT_URL"* ]] || false
+}
+
+@test "two runs of the same task at once both keep their output in the log" {
+  bash "$repo/tools/nas.sh" serve-status >"$dir/first" 2>&1 &
+  first=$!
+  bash "$repo/tools/nas.sh" serve-status >"$dir/second" 2>&1 &
+  second=$!
   wait "$first"
-  code=$?
-  set -e
-  [ "$code" -eq 0 ]
+  wait "$second"
   grep -q "No serve config" "$dir/first"
+  grep -q "No serve config" "$dir/second"
+  [ "$(grep -c "No serve config" "$repo/tmp/deploy/serve-status.log")" -eq 2 ]
 }
 
-@test "a run whose output pipe can't be opened for reading fails at once instead of hanging" {
-  # The output goes to a file: a hung run's filter would hold a pipe open.
-  set +e
-  STUB_FIFO_WRITE_ONLY=1 perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
-  code=$?
-  set -e
-  [ "$code" -eq 1 ]
-  grep -q "the output filter could not start" "$dir/terminal"
+@test "the log keeps every run, and each run shows only its own output" {
+  nas serve-status
+  nas serve-status
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "No serve config" <<<"$output")" -eq 1 ]
+  [ "$(grep -c "No serve config" "$repo/tmp/deploy/serve-status.log")" -eq 2 ]
 }
 
-@test "a run whose output filter dies still runs its cleanup and fails instead of hanging" {
+@test "a run whose output can't be shown fails, even when the task passed" {
+  STUB_TAIL_FAILS=1 nas serve-status
+  [ "$status" -eq 1 ]
+  [[ $output == *"the output could not be shown"* ]] || false
+  grep -q "No serve config" "$repo/tmp/deploy/serve-status.log"
+}
+
+@test "the recovery message of a cut-off promotion reaches the task log even when nothing can be shown" {
   healthy o11y
   go deploy
-  STUB_TEE_DIES=1 O11Y_CONFIRM=down run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" down
+  first=$(staged)
+  rm "$repo/tmp/deploy/staged"
+  sleep 1
+  STUB_TAIL_FAILS=1 STUB_SSH_FAIL_ON="*current.new && ln -sfn*" go deploy
   [ "$status" -ne 0 ]
-  [ "$status" -ne 142 ]
-  [ ! -e "$remote/.deploy.lock" ]
+  grep -q "current should name release $(staged) and previous release $first" "$repo/tmp/deploy/deploy.log"
+}
+
+@test "remote diagnostics stay in the task log and out of the operator's copy" {
+  nas preflight
+  [ "$status" -eq 0 ]
+  grep -q '^raw| --- SSH reaches the host' "$repo/tmp/deploy/preflight.log"
+  [[ $output != *"raw| "* ]] || false
+  [[ $output != *"--- SSH reaches the host"* ]] || false
 }
