@@ -13,6 +13,7 @@ O11Y_COMPOSE=${O11Y_COMPOSE:-docker-cli-plugin-docker-compose}
 pin_docker_api() {
   local min
   min=$(docker version --format '{{.Server.MinAPIVersion}}')
+  # shellcheck disable=SC2312 # printf, sort and head over two words don't fail
   if [[ $(printf '%s\n' 1.44 "$min" | sort -V | head -n 1) == 1.44 ]]; then
     export DOCKER_API_VERSION=$min
   fi
@@ -34,6 +35,7 @@ isolate_environment() {
 }
 
 host_is_linux() {
+  # shellcheck disable=SC2312 # uname -s doesn't fail
   [[ $(uname -s) == Linux ]]
 }
 
@@ -118,6 +120,18 @@ expect_status() {
     echo "expected status $want, got $got" >&2
     return 1
   }
+}
+
+# output_is <expected> <command...>: the command succeeds and prints exactly
+# the expected text. Comparing the output alone passes a command that
+# printed the right answer and then failed, as a dropped connection or a
+# timed-out curl can, and one that failed with nothing when nothing is the
+# answer wanted.
+output_is() {
+  local want=$1 got
+  shift
+  got=$("$@") || return 1
+  [[ $got == "$want" ]]
 }
 
 # sentinel_absent <sentinel> <name=path>...: fails when a file or directory

@@ -26,6 +26,7 @@ O11Y_DATA_DIR=$(test_data_dir smoke)
 export O11Y_DATA_DIR O11Y_GRAFANA_ROOT_URL=$grafana/
 export O11Y_GRAFANA_PORT=13000 O11Y_OTLP_GRPC_PORT=14317 O11Y_OTLP_HTTP_PORT=14318
 # Compose itself reads s3.env, so the invoking user has to own it.
+# shellcheck disable=SC2312 # id doesn't fail
 O11Y_SECRETS_OWNER=$(id -u):$(id -g)
 export O11Y_SECRETS_OWNER
 
@@ -74,11 +75,13 @@ inside() {
 }
 
 is_ready() {
-  [[ $(inside "$1") == 200 ]]
+  output_is 200 inside "$1"
 }
 
 is_healthy() {
-  [[ $(docker inspect -f '{{.State.Health.Status}}' "$(main ps -q "$1")") == healthy ]]
+  local id
+  id=$(main ps -q "$1") || return 1
+  output_is healthy docker inspect -f '{{.State.Health.Status}}' "$id"
 }
 
 wait_ready() {
@@ -100,15 +103,18 @@ grafana_status() {
 }
 
 container_ids() {
-  local service
+  local service id
   for service in "${services[@]}"; do
-    echo "$service $(main ps -q "$service")"
+    id=$(main ps -q "$service") || return 1
+    echo "$service $id"
   done
 }
 
 rm -rf "$out"
 mkdir -p "$out"
-# Everything printed from here on is kept for the sentinel search.
+# Everything printed from here on is kept for the sentinel search, which
+# fails on an empty transcript.
+# shellcheck disable=SC2312 # tee runs for the rest of the script
 exec > >(tee "$out/transcript.log") 2>&1
 tools/render.sh "$out"
 
@@ -168,16 +174,16 @@ secrets/grafana_admin_password 472:472 400 33
 secrets/rustfs.access_key 10001:10001 400 21
 secrets/rustfs.secret_key 10001:10001 400 41
 secrets/s3.env $O11Y_SECRETS_OWNER 600 102"
-[[ $(util "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*") == "$expected" ]] ||
+output_is "$expected" util "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*" ||
   die "1: owners, modes or sizes differ from the layout"
 before=$(fingerprint)
 init || die "1: the second init failed"
-[[ $(fingerprint) == "$before" ]] || die "1: a second init changed a file"
+output_is "$before" fingerprint || die "1: a second init changed a file"
 # A first run interrupted after the keys were written, before s3.env was,
 # with a temporary file left behind.
 util 'rm /d/secrets/s3.env && : >/d/secrets/.tmp.s3.env'
 init || die "1: init did not recover from an interrupted run"
-[[ $(fingerprint) == "$before" ]] || die "1: recovery changed a key or left a stray file"
+output_is "$before" fingerprint || die "1: recovery changed a key or left a stray file"
 # A truncated key while the store is still empty is generated afresh.
 truncate_secret rustfs.access_key
 init || die "1: init did not replace a truncated key in an empty store"
@@ -195,18 +201,33 @@ main up -d >"$out/up.log" 2>&1 || {
 bucket_log() {
   tr -d '\r' | grep '^bucket ' | sort | tr '\n' ';'
 }
-[[ $(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$(main ps -a -q s3-buckets)") == "exited 0" ]] ||
+first_buckets_run() {
+  main logs --no-log-prefix s3-buckets 2>&1 | bucket_log
+}
+buckets_run() {
+  main run --rm -T s3-buckets 2>&1 | bucket_log
+}
+listed_buckets() {
+  s3probe buckets | sort
+}
+buckets_state() {
+  local id
+  id=$(main ps -a -q s3-buckets) || return 1
+  docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$id"
+}
+output_is "exited 0" buckets_state ||
   die "2: s3-buckets did not exit 0"
-[[ $(main logs --no-log-prefix s3-buckets 2>&1 | bucket_log) == "bucket loki created;bucket mimir-blocks created;bucket mimir-ruler created;bucket tempo created;" ]] ||
+output_is "bucket loki created;bucket mimir-blocks created;bucket mimir-ruler created;bucket tempo created;" first_buckets_run ||
   die "2: the first run did not create the four buckets"
-buckets=$(s3probe buckets | sort)
-[[ $(main run --rm -T s3-buckets 2>&1 | bucket_log) == "bucket loki exists;bucket mimir-blocks exists;bucket mimir-ruler exists;bucket tempo exists;" ]] ||
+buckets=$(listed_buckets)
+output_is "bucket loki exists;bucket mimir-blocks exists;bucket mimir-ruler exists;bucket tempo exists;" buckets_run ||
   die "2: a second run did not find the four buckets"
-[[ $(s3probe buckets | sort) == "$buckets" ]] || die "2: a second run recreated a bucket"
+output_is "$buckets" listed_buckets || die "2: a second run recreated a bucket"
 s3probe delete-bucket mimir-ruler
-[[ $(main run --rm -T s3-buckets 2>&1 | bucket_log) == "bucket loki exists;bucket mimir-blocks exists;bucket mimir-ruler created;bucket tempo exists;" ]] ||
+output_is "bucket loki exists;bucket mimir-blocks exists;bucket mimir-ruler created;bucket tempo exists;" buckets_run ||
   die "2: a run after a partial bootstrap did not create exactly the missing bucket"
-[[ $(s3probe buckets | sort | grep -v '^mimir-ruler') == "$(grep -v '^mimir-ruler' <<<"$buckets")" ]] ||
+kept=$(grep -v '^mimir-ruler' <<<"$buckets")
+others=$(listed_buckets | grep -v '^mimir-ruler') && [[ $others == "$kept" ]] ||
   die "2: completing a partial bootstrap recreated an existing bucket"
 # A missing dependency can still boot by luck, so the model is checked too.
 jq -e '[.services["loki", "tempo", "mimir"].depends_on["s3-buckets"].condition] == ["service_completed_successfully", "service_completed_successfully", "service_completed_successfully"]
@@ -223,7 +244,7 @@ if COMPOSE_IGNORE_ORPHANS=1 dc -f "$release/compose.init.yaml" run --rm -T init 
 fi
 grep -qF 'rustfs.secret_key is missing or damaged and /data/rustfs/.rustfs.sys already exists' "$out/init.log" ||
   die "2: init failed, but not by refusing to replace the damaged key"
-[[ $(fingerprint) == "$before" ]] || die "2: a refused init still changed a file"
+output_is "$before" fingerprint || die "2: a refused init still changed a file"
 seed rustfs.secret_key "$sentinel_secret"
 { init && seeded; } || die "2: the sentinel key could not be restored"
 ok "2: up succeeds, buckets are created once and completed after a partial run, rustfs refuses the default login, init refuses to replace a key in use"
@@ -238,16 +259,16 @@ done
 ok "3: all six services are ready, and the four with a healthcheck report healthy"
 
 # 4. Grafana access model.
-[[ $(grafana_status "$grafana/api/org") == 200 ]] || die "4: anonymous access is off"
-[[ $(grafana_status -X POST -H 'Content-Type: application/json' \
-  -d '{"dashboard":{"uid":"o11y-smoke","title":"o11y smoke"},"overwrite":true}' "$grafana/api/dashboards/db") == 200 ]] ||
+output_is 200 grafana_status "$grafana/api/org" || die "4: anonymous access is off"
+output_is 200 grafana_status -X POST -H 'Content-Type: application/json' \
+  -d '{"dashboard":{"uid":"o11y-smoke","title":"o11y smoke"},"overwrite":true}' "$grafana/api/dashboards/db" ||
   die "4: an anonymous user cannot save a dashboard"
-[[ $(grafana_status -X DELETE "$grafana/api/dashboards/uid/o11y-smoke") == 200 ]] || die "4: the test dashboard could not be deleted"
-[[ $(grafana_status -X POST -H 'Content-Type: application/json' \
-  -d '{"name":"smoke","type":"prometheus","access":"proxy","url":"http://127.0.0.1"}' "$grafana/api/datasources") == 403 ]] ||
+output_is 200 grafana_status -X DELETE "$grafana/api/dashboards/uid/o11y-smoke" || die "4: the test dashboard could not be deleted"
+output_is 403 grafana_status -X POST -H 'Content-Type: application/json' \
+  -d '{"name":"smoke","type":"prometheus","access":"proxy","url":"http://127.0.0.1"}' "$grafana/api/datasources" ||
   die "4: an anonymous user can add a datasource"
 # The password reaches curl on stdin, as a real one would have to.
-[[ $(printf 'user = "admin:%s"\n' "$sentinel_password" | grafana_status -K - "$grafana/api/admin/settings") == 200 ]] ||
+printf 'user = "admin:%s"\n' "$sentinel_password" | output_is 200 grafana_status -K - "$grafana/api/admin/settings" ||
   die "4: the admin password from the file does not work"
 # With anonymous access on, Grafana treats a failed login as an anonymous
 # request, and the admin API forbids the anonymous Editor: 403, where the
@@ -255,9 +276,9 @@ ok "3: all six services are ready, and the four with a healthcheck report health
 # exactly that, or an outage would pass for a refusal.
 printf 'user = "admin:%s"\n' admin | expect_status 403 -K - "$grafana/api/admin/settings" ||
   die "4: the default admin password was not refused"
-[[ $(curl -s -m 15 "$grafana/api/datasources" | jq -c '[.[].uid] | sort') == '["loki","mimir","tempo"]' ]] ||
+sources=$(curl -fs -m 15 "$grafana/api/datasources" | jq -c '[.[].uid] | sort') && [[ $sources == '["loki","mimir","tempo"]' ]] ||
   die "4: the provisioned datasources are not the expected three"
-[[ $(curl -s -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') == true ]] ||
+provisioned=$(curl -fs -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') && [[ $provisioned == true ]] ||
   die "4: the provisioned dashboard is missing"
 # The call deploy makes on every run (home_cmd in tools/nas.sh), until the
 # Grafana pin has the fix for grafana/grafana#131876.
@@ -281,7 +302,7 @@ ok "4: anonymous Editor can save dashboards but not datasources, only the genera
 # the host's loopback through the host network on Linux and through
 # host.docker.internal on Docker Desktop.
 export O11Y_CHECK_OTLP_URL=http://127.0.0.1:14318 O11Y_CHECK_GRAFANA_URL=$grafana
-if [[ $(uname -s) == Linux ]]; then
+if host_is_linux; then
   telemetrygen=(docker run --rm --network host "$telemetrygen_image" traces --otlp-endpoint 127.0.0.1:14317 --otlp-insecure)
 else
   telemetrygen=(docker run --rm "$telemetrygen_image" traces --otlp-endpoint host.docker.internal:14317 --otlp-insecure)
@@ -295,10 +316,12 @@ ok "5: receipt over OTLP/HTTP and gRPC through the published ports"
 # 6. Read back from the object store. A backend whose container is removed
 # and whose local directory is emptied can only answer from its bucket.
 has_objects() {
-  [[ $(s3probe count "$1") -ge 1 ]]
+  local count
+  count=$(s3probe count "$1") || return 1
+  [[ $count =~ ^[0-9]+$ && $count -ge 1 ]]
 }
-[[ $(inside -X POST http://loki:3100/flush) == 204 ]] || die "6: Loki's flush endpoint failed"
-[[ $(inside -X POST http://mimir:8080/ingester/flush) == 204 ]] || die "6: Mimir's flush endpoint failed"
+output_is 204 inside -X POST http://loki:3100/flush || die "6: Loki's flush endpoint failed"
+output_is 204 inside -X POST http://mimir:8080/ingester/flush || die "6: Mimir's flush endpoint failed"
 poll 120 has_objects loki || die "6: the loki bucket is empty after a flush"
 poll 120 has_objects mimir-blocks || die "6: the mimir-blocks bucket is empty after a flush"
 # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
@@ -328,8 +351,10 @@ ok "6: the three buckets hold objects, Loki returns the receipt from the bucket 
 
 # 7. Self-monitoring.
 all_up() {
-  [[ $(curl -s -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=up%3D%3D1" |
-    jq -c '[.data.result[].metric.job] | sort') == '["alloy","grafana","loki","mimir","tempo"]' ]]
+  local jobs
+  jobs=$(curl -fs -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query?query=up%3D%3D1" |
+    jq -c '[.data.result[].metric.job] | sort') || return 1
+  [[ $jobs == '["alloy","grafana","loki","mimir","tempo"]' ]]
 }
 poll 180 all_up || die "7: up is not 1 for the five scraped jobs"
 ok "7: up is 1 for alloy, grafana, loki, mimir and tempo"
@@ -343,7 +368,7 @@ before=$(container_ids)
 tools/render.sh "$out/again" --config-root "$out/config"
 release=$out/again/release
 main up -d >"$out/up.log" 2>&1 || die "8: up from an identical release failed"
-[[ $(container_ids) == "$before" ]] || die "8: an identical release recreated a container"
+output_is "$before" container_ids || die "8: an identical release recreated a container"
 mkdir -p "$out/src/tools"
 cp -R compose.yaml compose.init.yaml compose.tools.yaml config "$out/src/"
 cp tools/render.sh "$out/src/tools/"
@@ -389,6 +414,7 @@ args) main exec -d -T rustfs sh -c 'while :; do sleep 5; done' "$sentinel_secret
 rendered) echo "$sentinel_secret" >>"$release/.env" ;;
 esac
 for service in "${services[@]}"; do
+  # shellcheck disable=SC2312 # an empty id fails docker top, which ends the run
   docker top "$(main ps -q "$service")" >>"$out/processes.log"
 done
 main logs --no-color >"$out/containers.log" 2>&1

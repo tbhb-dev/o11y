@@ -94,3 +94,18 @@ mode() {
     [ "$(wc -l <"$dir/MANIFEST.sha256")" -eq "$(find "$dir" -type f ! -name MANIFEST.sha256 | wc -l)" ]
   done
 }
+
+# The first file of the first manifest fails to hash and every later call
+# works, so only a manifest line can lose its checksum.
+@test "a file that can't be hashed fails the render, rather than leaving its manifest line without a checksum" {
+  mkdir "$out/bin"
+  real=$(command -v sha256sum || true)
+  {
+    echo '#!/bin/sh'
+    echo "[ -e '$out/bin/failed' ] || { : >'$out/bin/failed'; exit 1; }"
+    if [[ -n $real ]]; then echo "exec '$real' \"\$@\""; else echo 'exec shasum -a 256 "$@"'; fi
+  } >"$out/bin/sha256sum"
+  chmod +x "$out/bin/sha256sum"
+  PATH="$out/bin:$PATH" run bash "$src/tools/render.sh" "$out/a"
+  [ "$status" -ne 0 ]
+}

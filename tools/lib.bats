@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# The sentinel search the boot test ends with: it must fail on a leak, name
-# the place and never print the value.
+# The helpers the boot test relies on. The sentinel search must fail on a
+# leak, name the place and never print the value, and a check on output
+# must also fail when its command does.
 
 setup() {
   # shellcheck source=tools/lib.sh
@@ -141,4 +142,28 @@ stub() {
   STUB_OUT=Darwin publish_s3_env image "$dir/s3.env"
   grep -q -- '--log-driver none' "$dir/docker.args"
   [ "$O11Y_S3_ENV_FILE" = "$dir/s3.env" ]
+}
+
+@test "output_is passes a command that succeeds with exactly the expected output" {
+  stub probe
+  STUB_OUT=200 run output_is 200 probe
+  [ "$status" -eq 0 ]
+}
+
+@test "output_is fails a command that prints the expected output and then fails" {
+  stub probe
+  STUB_OUT=200 STUB_EXIT=28 run output_is 200 probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that fails with nothing where nothing is expected" {
+  stub probe
+  STUB_EXIT=1 run output_is '' probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that succeeds with other output" {
+  stub probe
+  STUB_OUT=503 run output_is 200 probe
+  [ "$status" -eq 1 ]
 }

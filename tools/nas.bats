@@ -191,7 +191,12 @@ exec)
 inspect) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
 run)
   case $all in
-  *"stat -c"*) cat "$STUB/layout" ;;
+  *"stat -c"*)
+    cat "$STUB/layout"
+    # STUB_LAYOUT_THEN_FAILS lists the layout, then fails, as a dropped
+    # connection can.
+    [ -z "${STUB_LAYOUT_THEN_FAILS:-}" ] || exit 255
+    ;;
   *"find /d -mindepth 1"*)
     mounted=${all##* -v }
     mounted=${mounted%%:/d *}
@@ -946,6 +951,14 @@ http://grafana:3000/api/org/preferences' ]
   layout
   sed -i.bak 's/^secrets 0:0 755$/secrets 0:0 777/' "$dir/layout"
   go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"differ from the layout"* ]] || false
+}
+
+@test "gate-test fails when the layout listing prints the expected layout and then fails" {
+  healthy o11y-gate
+  layout
+  STUB_LAYOUT_THEN_FAILS=1 go gate-test
   [ "$status" -ne 0 ]
   [[ $output == *"differ from the layout"* ]] || false
 }

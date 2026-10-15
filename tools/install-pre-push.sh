@@ -55,6 +55,7 @@ if [[ ${1-} == --check ]]; then
     echo "install-pre-push: CI has no local hooks to check"
     exit 0
   fi
+  # shellcheck disable=SC2312 # wrapper only prints, and a failed cat prints nothing it could match
   if is_wrapper "$hooks/pre-push" && is_prek "$hooks/pre-push.prek" &&
     [[ $(wrapper) == "$(cat "$hooks/pre-push")" ]]; then
     exit 0

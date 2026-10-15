@@ -32,18 +32,19 @@ cli_image=docker:29.0.1-cli@sha256:f7d048590d889e00868920f658e807ecbc4ef662d51c9
 compose_version=2.20.1
 projects=(o11y o11y-gate)
 
-# leftovers: what the two projects still have on the engine.
+# leftovers: what the two projects still have on the engine. It fails when
+# the engine can't be asked, which must not read as nothing left.
 leftovers() {
   local project
   for project in "${projects[@]}"; do
-    docker ps -aq --filter "label=com.docker.compose.project=$project"
-    docker network ls -q --filter "label=com.docker.compose.project=$project"
-    docker volume ls -q --filter "label=com.docker.compose.project=$project"
+    docker ps -aq --filter "label=com.docker.compose.project=$project" || return 1
+    docker network ls -q --filter "label=com.docker.compose.project=$project" || return 1
+    docker volume ls -q --filter "label=com.docker.compose.project=$project" || return 1
   done
 }
 
 if [[ ${1:-} != --inside ]]; then
-  [[ -z $(leftovers) ]] ||
+  output_is '' leftovers ||
     die "a container, network or volume of project o11y or o11y-gate exists on this engine; the rehearsal uses those names and leaves them alone"
   util_image=$(sed -n 's/^ *image: \(rustfs\/rustfs:.*\)$/\1/p' compose.yaml | head -n 1)
   remove_scratch() {
@@ -52,10 +53,11 @@ if [[ ${1:-} != --inside ]]; then
   }
   remove_scratch
   trap remove_scratch EXIT
+  commit=$(git rev-parse --short HEAD)
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$scratch:$scratch" -v "$root:/src:ro" \
-    -e "REHEARSAL_COMMIT=$(git rev-parse --short HEAD)" "$cli_image" \
+    -e "REHEARSAL_COMMIT=$commit" "$cli_image" \
     sh -c 'apk add --no-cache bash coreutils curl findutils jq tar >/dev/null && exec bash /src/tools/nas-rehearsal.sh --inside'
-  [[ -z $(leftovers) ]] || die "the rehearsal left a container, network or volume behind"
+  output_is '' leftovers || die "the rehearsal left a container, network or volume behind"
   ok "rehearsal: nothing of projects o11y and o11y-gate is left on the engine"
   exit
 fi
@@ -72,7 +74,8 @@ arch=$(uname -m)
 url=https://github.com/docker/compose/releases/download/v$compose_version/docker-compose-linux-$arch
 curl -fsSL -o "$compose" "$url"
 expected=$(curl -fsSL "$url.sha256" | cut -d' ' -f1)
-[[ $(sha256sum "$compose" | cut -d' ' -f1) == "$expected" ]] || die "the Compose $compose_version download does not match its checksum"
+actual=$(sha256sum "$compose" | cut -d' ' -f1)
+[[ $actual == "$expected" ]] || die "the Compose $compose_version download does not match its checksum"
 chmod +x "$compose"
 
 stub() {
@@ -182,13 +185,13 @@ pointer() {
 # Grafana provisioned it, run as the instant query the panel makes, with the
 # test applied to the job and value of each series it returns.
 up_panel() {
-  local rustfs expr
+  local rustfs expr query
   rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs)
   [[ -n $rustfs ]] || return 1
-  expr=$(docker exec "$rustfs" curl -s -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health |
+  expr=$(docker exec "$rustfs" curl -fs -m 15 http://grafana:3000/api/dashboards/uid/o11y-stack-health |
     jq -er '.dashboard.panels[] | select(.title == "Up") | .targets[0] | select(.instant == true) | .expr') || return 1
-  docker exec "$rustfs" curl -s -m 15 \
-    "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$(jq -rn --arg v "$expr" '$v | @uri')" |
+  query=$(jq -rn --arg v "$expr" '$v | @uri')
+  docker exec "$rustfs" curl -fs -m 15 "http://grafana:3000/api/datasources/proxy/uid/mimir/api/v1/query?query=$query" |
     jq -e ".status == \"success\" and ([.data.result[] | [.metric.job, .value[1]]] | sort | $1)" >/dev/null
 }
 
@@ -196,26 +199,31 @@ step "preflight failed" preflight
 step "stage failed" stage
 first=releases/$(cat tmp/deploy/staged)
 step "the first deploy failed" deploy
-[[ $(pointer current) == "$first" && ! -e $remote/previous ]] || die "rehearsal: the first deploy did not make its release current"
+output_is "$first" pointer current && [[ ! -e $remote/previous ]] || die "rehearsal: the first deploy did not make its release current"
 ok "rehearsal: first deploy is current"
 
 status=$(step "status failed" status)
-[[ $(grep -c ' ready$' <<<"$status") -eq 6 ]] || die "rehearsal: status does not report all six services ready"
+output_is 6 grep -c ' ready$' <<<"$status" || die "rehearsal: status does not report all six services ready"
 grep -q "(release ${first#releases/}) Up" <<<"$status" || die "rehearsal: status does not name the running release"
 ok "rehearsal: status reports six ready services and the running release"
-[[ -n $(bash tools/nas.sh logs loki) ]] || die "rehearsal: logs printed nothing"
+# The task prints a line of its own, so only a line of Loki's log shows
+# that it printed the log.
+logs=$(step "logs failed" logs loki)
+grep -q 'level=' <<<"$logs" || die "rehearsal: logs printed no line of Loki's log"
 ok "rehearsal: logs prints Loki's log"
 
 rm tmp/deploy/staged
 sleep 1
 step "the second deploy failed" deploy
 second=releases/$(cat tmp/deploy/staged)
-[[ $second != "$first" && $(pointer current) == "$second" && $(pointer previous) == "$first" ]] ||
+if [[ $second == "$first" ]] || ! output_is "$second" pointer current || ! output_is "$first" pointer previous; then
   die "rehearsal: the second deploy did not move previous and current"
+fi
 ok "rehearsal: second deploy is current, the first is previous"
 
 step "rollback --previous failed" rollback --previous
-grep -q "(release ${first#releases/}) Up" <<<"$(bash tools/nas.sh status)" ||
+status=$(step "status failed" status)
+grep -q "(release ${first#releases/}) Up" <<<"$status" ||
   die "rehearsal: after rollback --previous the containers do not run the first release"
 ok "rehearsal: rollback --previous runs the first release again"
 # Series another release wrote under other job names are still in Mimir
@@ -224,14 +232,15 @@ ok "rehearsal: rollback --previous runs the first release again"
 # rather than show the jobs as up.
 five_up='. == [["alloy", "1"], ["grafana", "1"], ["loki", "1"], ["mimir", "1"], ["tempo", "1"]]'
 poll 180 up_panel "$five_up" || die "rehearsal: after rollback --previous the dashboard's Up query does not show exactly the five jobs up"
-docker stop "$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+alloy=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)
+docker stop "$alloy" >/dev/null
 poll 180 up_panel '. == []' || die "rehearsal: with Alloy stopped the dashboard's Up query still returns its last samples"
-docker start "$(docker ps -aq --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+docker start "$alloy" >/dev/null
 poll 180 up_panel "$five_up" || die "rehearsal: once Alloy is back the dashboard's Up query does not show the five jobs up"
 ok "rehearsal: after rollback --previous the dashboard's Up query shows exactly the five jobs up, and nothing once their samples are stale"
 
 step "down failed" down
-[[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y) ]] || die "rehearsal: down left containers"
+output_is '' docker ps -aq --filter label=com.docker.compose.project=o11y || die "rehearsal: down left containers"
 [[ -d $remote/data/secrets && -L $remote/current ]] || die "rehearsal: down removed more than the containers"
 ok "rehearsal: down removed the containers and kept data, secrets and releases"
 
@@ -245,12 +254,13 @@ planted=$remote/$first
 "$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" -f "$planted/compose.tools.yaml" \
   run -T --entrypoint /bin/true s3probe >/dev/null 2>&1 || die "rehearsal: the one-off s3probe container could not be planted"
 "$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" down >/dev/null 2>&1
-[[ -n $(one_offs) ]] || die "rehearsal: a plain down removed the one-off container, so the planted leftover proves nothing"
+planted_ids=$(one_offs)
+[[ -n $planted_ids ]] || die "rehearsal: a plain down removed the one-off container, so the planted leftover proves nothing"
 ok "rehearsal: a plain down keeps a stopped one-off s3probe container in o11y-gate"
 
 step "gate-test failed" gate-test
-[[ -z $(one_offs) ]] || die "rehearsal: gate-test left a one-off container behind"
-[[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y-gate) ]] || die "rehearsal: gate-test left containers"
+output_is '' one_offs || die "rehearsal: gate-test left a one-off container behind"
+output_is '' docker ps -aq --filter label=com.docker.compose.project=o11y-gate || die "rehearsal: gate-test left containers"
 step "gate-clean failed" gate-clean
 [[ ! -e $remote/gate && -d $remote/data ]] || die "rehearsal: gate-clean removed the wrong thing"
 ok "rehearsal: gate-test passed and stopped its project, gate-clean removed only the gate directory"
