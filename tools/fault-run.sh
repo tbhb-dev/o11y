@@ -5,6 +5,7 @@
 # 44317 and 44318, and removes it on exit, pass or fail.
 #
 #   tools/fault-run.sh
+#   tools/fault-run.sh --check-peaks <peaks file>
 #
 # Client load is telemetrygen at 50 items a second per signal through the
 # published ports. During the outage, the receipt check for traces and logs
@@ -17,13 +18,27 @@
 # The record stays in tmp/fault-run/: samples.tsv (raw), checks.log (what
 # each check reported) and summary.txt (peaks per container, and whether
 # anon stayed under 70 percent of its limit). It holds placeholder values
-# only.
+# only. --check-peaks runs only the last check, on a peaks file, which is
+# how tools/fault-run.bats tests it.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 # shellcheck source=tools/lib.sh
 source tools/lib.sh
+
+# peaks_ok <peaks file>: one line per container, six of them, each with ten
+# fields, and anon under 70 percent of the limit (field 7) in every one.
+peaks_ok() {
+  # shellcheck disable=SC2016 # awk's own fields
+  awk 'NF != 10 || $7 + 0 >= 70 { bad = 1 } END { exit bad || NR != 6 }' "$1"
+}
+
+if [[ ${1:-} == --check-peaks ]]; then
+  peaks_ok "$2"
+  exit
+fi
+
 pin_docker_api
 
 project=o11y-fault
@@ -166,8 +181,9 @@ check "Mimir is back: the receipt check passes for metrics" receipt metrics
 sleep 60
 
 for signal in traces logs metrics; do
-  [[ $(docker inspect -f '{{.State.ExitCode}}' "$project-load-$signal" 2>/dev/null || echo running) =~ ^(0|running)$ ]] ||
-    die "the $signal load generator failed"
+  state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$project-load-$signal") ||
+    die "the $signal load generator could not be inspected"
+  [[ $state == "running 0" || $state == "exited 0" ]] || die "the $signal load generator failed ($state)"
 done
 docker logs "$project-sampler" >"$out/samples.tsv" 2>&1
 docker rm -f "$project-sampler" >/dev/null
@@ -196,6 +212,4 @@ awk 'NR == FNR { limit[$1] = $4; next }
   cat "$out/peaks.txt"
 } >"$out/summary.txt"
 cat "$out/summary.txt"
-# shellcheck disable=SC2016 # awk's own fields
-check "anon stayed under 70 percent of the limit in every container" \
-  awk 'NF != 10 || $8 + 0 >= 70 { bad = 1 } END { exit bad || NR != 6 }' "$out/peaks.txt"
+check "anon stayed under 70 percent of the limit in every container" peaks_ok "$out/peaks.txt"
