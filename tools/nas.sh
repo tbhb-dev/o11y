@@ -528,14 +528,12 @@ home_cmd() {
   echo "$docker exec $1 cat /run/o11y/grafana_admin_password | sed $(q 's/^/user = "admin:/; s/$/"/') | $docker exec -i $2 curl -s -o /dev/null -w $(q '%{http_code}') -m 10 -K - -X PUT -H $(q 'Content-Type: application/json') -d $(q '{"homeDashboardUID":"o11y-stack-health"}') http://grafana:3000/api/org/preferences"
 }
 
+# set_home <project>: one attempt, never retried, because repeated failed
+# logins can lock the admin account for a while.
 set_home() {
   local grafana rustfs code
-  if grafana=$(container_of "$1" grafana) && rustfs=$(container_of "$1" rustfs) &&
-    code=$(remote "$(home_cmd "$grafana" "$rustfs")" 2>>"$diagnostics_log") && [[ $code == 200 ]]; then
-    return
-  fi
-  echo "FAIL $task: Grafana's home dashboard could not be set through its admin API" >&2
-  return 1
+  grafana=$(container_of "$1" grafana) && rustfs=$(container_of "$1" rustfs) &&
+    code=$(remote "$(home_cmd "$grafana" "$rustfs")" 2>>"$diagnostics_log") && [[ $code == 200 ]]
 }
 
 # health_gate <project> [receipt.sh arguments...]
@@ -650,8 +648,8 @@ deploy_plan() {
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
     echo "$docker exec -i <rustfs container> curl ...    # readiness of each service, then the receipt check"
-    echo "$(home_cmd '<grafana container>' '<rustfs container>')    # the home dashboard"
     echo "$(swap_cmd "$id" '<the release current names>')    # on a first deploy, only current"
+    echo "$(home_cmd '<grafana container>' '<rustfs container>')    # the home dashboard"
     echo "rmdir $dir/.deploy.lock"
   } | sed 's/^/  /'
 }
@@ -668,11 +666,18 @@ deploy() {
   quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
-    health_gate o11y && set_home o11y; then
+    health_gate o11y; then
     swap_pending="$id $current"
     quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id passed the health gate, but the pointers could not be moved"
     swap_pending=
     ok "$task: release $id passed the health gate and is now current"
+    # After promotion, so a failure leaves current naming what runs; it
+    # still fails the run so the operator sees it.
+    if ! set_home o11y; then
+      echo "WARN $task: release $id is current, but Grafana's home dashboard could not be set; see $diagnostics_log. Run the deploy again (O11Y_CONFIRM=deploy mise run deploy), or as the admin set the organization's home dashboard to Stack health under Administration > General > Default preferences" >&2
+      exit 1
+    fi
+    ok "$task: Grafana's home dashboard is the Stack health dashboard"
     return
   fi
   echo "FAIL $task: release $id was not promoted and is left as it is for inspection; see $diagnostics_log" >&2
@@ -813,6 +818,10 @@ smoke_remote() {
     ;;
   *) die "$task: unknown argument" ;;
   esac
+  # What an anonymous user gets as home; see home_cmd.
+  [[ $(curl -sS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -r '.redirectUri') == /d/o11y-stack-health/* ]] ||
+    die "$task: the anonymous home is not the Stack health dashboard"
+  ok "$task: the anonymous home is the Stack health dashboard"
 }
 
 # The gate project's layout after init, as smoke.sh asserts it locally:
