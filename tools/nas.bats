@@ -1560,11 +1560,23 @@ wait_for() {
   [ -d "$remote/.deploy.lock" ]
 }
 
-@test "a process the task leaves behind with an extra descriptor can't hold the run open" {
+# The operator may pipe the task's error output, as in `mise run deploy
+# 2>&1 | tee`. The reader here waits for the end of that pipe, so a leftover
+# process that kept a descriptor on it would hold the run open.
+@test "a process the task leaves behind with an extra descriptor can't hold the operator's pipe open" {
   healthy o11y
-  STUB_LEAK_ON="rmdir*" STUB_LEAK_KIND=fd9 O11Y_CONFIRM=deploy run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" deploy
+  STUB_LEAK_ON="rmdir*" STUB_LEAK_KIND=fd9 O11Y_CONFIRM=deploy run perl -e 'alarm 20; exec @ARGV' \
+    bash -c 'set -o pipefail; bash "$1" deploy 2>&1 | cat' _ "$repo/tools/nas.sh"
   [ "$status" -eq 0 ]
   [[ $output == *"is now current"* ]] || false
+}
+
+@test "an unfiltered task's leftover process can't hold the operator's pipe open" {
+  healthy o11y
+  STUB_LEAK_ON="*grafana_admin_password*" STUB_LEAK_KIND=fd9 run perl -e 'alarm 20; exec @ARGV' \
+    bash -c 'set -o pipefail; bash "$1" grafana-password 2>&1 | cat' _ "$repo/tools/nas.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = stub-grafana-password ]
 }
 
 @test "an INT sent to the task's whole process group fails the run with 130 and keeps the lock" {
