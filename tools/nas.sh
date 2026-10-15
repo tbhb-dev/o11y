@@ -943,27 +943,56 @@ kill_tree() {
 
 # filtered <task> [arguments]: runs the task as a child whose output goes
 # through redact, the raw text to the task log, and exits with its status.
+#
+# The pipe between them lives in a directory of this run's own, so runs of
+# the same task can't touch each other's. No open of it can block. This
+# shell first opens the pipe for reading and writing, which never waits,
+# and holds that until the filter reports its read end open; only then is
+# the child started. A filter that dies or can't open the pipe fails the
+# run before the task starts.
+#
 # The child runs in the foreground, so a signal reaches it, its own cleanup
 # decides what stays on the host, and its status, 128 and up for a signal,
-# is what this shell exits with. The filter reads a named pipe and ignores
-# INT and TERM, so it keeps draining through that cleanup. Once the child has ended, the filter gets
-# O11Y_DRAIN_TIMEOUT seconds (10) to finish. A process the task left
+# is what this shell exits with. The filter ignores INT and TERM, so it
+# keeps draining through that cleanup. Once the child has ended, the filter
+# gets O11Y_DRAIN_TIMEOUT seconds (10) to finish. A process the task left
 # behind can still hold the pipe open; the filter is then stopped and the
 # run fails, since the output may be incomplete.
 filtered() {
-  local fifo=tmp/deploy/.$task.fifo filter status deadline
-  rm -f "$fifo"
-  mkfifo -m 600 "$fifo"
+  local private fifo filter status deadline
+  private=$(mktemp -d tmp/deploy/.filter.XXXXXX)
+  fifo=$private/output
+  if ! mkfifo -m 600 "$fifo" || ! exec 8<>"$fifo"; then
+    rm -rf "$private"
+    echo "FAIL $task: the output filter could not start" >&2
+    exit 1
+  fi
   (
     trap '' INT TERM
-    tee -a "$log" <"$fifo" | redact
-  ) &
+    exec <"$fifo"
+    : >"$private/open"
+    tee -a "$log" | redact
+  ) 8<&- &
   filter=$!
+  exec 7>"$fifo"
+  deadline=$((SECONDS + 10))
+  until [[ -e $private/open ]]; do
+    if ! kill -0 "$filter" 2>/dev/null || ((SECONDS >= deadline)); then
+      kill_tree "$filter"
+      exec 7>&- 8<&-
+      rm -rf "$private"
+      echo "FAIL $task: the output filter could not start" >&2
+      exit 1
+    fi
+    sleep 0.05
+  done
+  exec 8<&-
   # This shell only waits; the child handles a signal.
   trap : INT TERM
   set +e
-  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >"$fifo" 2>&1
+  O11Y_NAS_FILTERED=1 bash "$root/tools/nas.sh" "$task" "$@" >&7 2>&1 7>&-
   status=$?
+  exec 7>&-
   deadline=$((SECONDS + ${O11Y_DRAIN_TIMEOUT:-10}))
   while kill -0 "$filter" 2>/dev/null && ((SECONDS < deadline)); do
     sleep 0.2
@@ -974,7 +1003,7 @@ filtered() {
     ((status != 0)) || status=1
   fi
   wait "$filter" 2>/dev/null
-  rm -f "$fifo"
+  rm -rf "$private"
   exit "$status"
 }
 

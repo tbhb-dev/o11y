@@ -244,11 +244,30 @@ STUB
   # slow filter would.
   stub "$dir/bin/tee" <<'STUB'
 [ -z "${STUB_SLOW_TEE:-}" ] || sleep 1
+# STUB_TEE_DIES stops the filter at once, as a filter that crashed would.
+[ -z "${STUB_TEE_DIES:-}" ] || exit 1
 exec "$STUB_TEE" "$@"
+STUB
+  # STUB_SYNC_FIFO makes the first run to create a pipe wait there until a
+  # test says the second run is done. STUB_FIFO_WRITE_ONLY leaves the pipe
+  # writable but not readable, so no reader can open it.
+  stub "$dir/bin/mkfifo" <<'STUB'
+"$STUB_MKFIFO" "$@" || exit
+for last; do :; done
+[ -z "${STUB_FIFO_WRITE_ONLY:-}" ] || chmod 200 "$last"
+if [ -n "${STUB_SYNC_FIFO:-}" ] && [ ! -e "$STUB/fifo-first" ]; then
+  : >"$STUB/fifo-first"
+  tries=0
+  while [ ! -e "$STUB/second-done" ] && [ "$tries" -lt 100 ]; do
+    sleep 0.1
+    tries=$((tries + 1))
+  done
+fi
 STUB
   STUB_TAR=$(command -v tar)
   STUB_TEE=$(command -v tee)
-  export STUB=$dir STUB_TAR STUB_TEE PATH="$dir/bin:$PATH"
+  STUB_MKFIFO=$(command -v mkfifo)
+  export STUB=$dir STUB_TAR STUB_TEE STUB_MKFIFO PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
@@ -260,6 +279,9 @@ STUB
 }
 
 teardown() {
+  # A run that hung leaves its processes behind; they all carry this copy's
+  # path.
+  pkill -f "$repo/tools/nas.sh" 2>/dev/null || true
   if [ -f "$dir/leaked-processes" ]; then
     xargs kill <"$dir/leaked-processes" 2>/dev/null || true
   fi
@@ -1386,4 +1408,39 @@ wait_for() {
   [ "$status" -eq 1 ]
   [[ $output == *"GF_SERVER_ROOT_URL"* ]] || false
   [[ $output == *"still held the output open"* ]] || false
+}
+
+@test "two runs of the same task started together both finish with their own output" {
+  STUB_SYNC_FIFO=1 perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status >"$dir/first" 2>&1 &
+  first=$!
+  wait_for "$dir/fifo-first"
+  run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status
+  : >"$dir/second-done"
+  [ "$status" -eq 0 ]
+  [[ $output == *"No serve config"* ]] || false
+  set +e
+  wait "$first"
+  code=$?
+  set -e
+  [ "$code" -eq 0 ]
+  grep -q "No serve config" "$dir/first"
+}
+
+@test "a run whose output pipe can't be opened for reading fails at once instead of hanging" {
+  # The output goes to a file: a hung run's filter would hold a pipe open.
+  set +e
+  STUB_FIFO_WRITE_ONLY=1 perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" serve-status >"$dir/terminal" 2>&1
+  code=$?
+  set -e
+  [ "$code" -eq 1 ]
+  grep -q "the output filter could not start" "$dir/terminal"
+}
+
+@test "a run whose output filter dies still runs its cleanup and fails instead of hanging" {
+  healthy o11y
+  go deploy
+  STUB_TEE_DIES=1 O11Y_CONFIRM=down run perl -e 'alarm 20; exec @ARGV' bash "$repo/tools/nas.sh" down
+  [ "$status" -ne 0 ]
+  [ "$status" -ne 142 ]
+  [ ! -e "$remote/.deploy.lock" ]
 }
