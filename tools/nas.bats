@@ -106,7 +106,7 @@ exec "$STUB_TAR" "$@"
 STUB
   stub "$dir/bin/git" <<<'echo abc1234'
   # The deploy host's own name; STUB_HOST_NAME_BAD makes it one that isn't.
-  stub "$dir/bin/hostname" <<<'if [ -n "${STUB_HOST_NAME_BAD:-}" ]; then echo "bad name;id"; else echo nas-node-01; fi'
+  stub "$dir/bin/hostname" <<<'[ "$1" = -s ] || exit 1; if [ -n "${STUB_HOST_NAME_BAD:-}" ]; then echo "bad name;id"; else echo nas-node-01; fi'
   stub "$dir/bin/getent" <<<'echo "192.0.2.20 STREAM otlp.example.ts.net"'
   # This machine's curl, which smoke-remote asks for the anonymous home.
   stub "$dir/bin/curl" <<'STUB'
@@ -1954,17 +1954,19 @@ STUB
 @test "stage reads the host's name over ssh, keeps it private, and renders it" {
   go stage
   [ "$status" -eq 0 ]
-  recorded "hostname"
+  recorded "hostname -s"
   [ "$(cat "$repo/tmp/deploy/host-name")" = nas-node-01 ]
   grep -qx 'O11Y_HOST_NAME=nas-node-01' "$repo/tmp/deploy/$(staged)/release/.env"
   [[ $output != *nas-node-01* ]] || false
 }
 
-@test "a host name that is not one stops stage before anything is uploaded" {
+@test "a host name that is not one renders unknown-host and warns" {
   STUB_HOST_NAME_BAD=1 go stage
-  [ "$status" -ne 0 ]
-  [[ $output == *"the host's name is not a host name"* ]] || false
-  ! recorded "tar -xpf" || false
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARN stage: the host's short name could not be read"* ]] || false
+  grep -qx 'O11Y_HOST_NAME=unknown-host' "$repo/tmp/deploy/$(staged)/release/.env"
+  [ ! -e "$repo/tmp/deploy/host-name" ]
+  [[ $output != *"bad name"* ]] || false
 }
 
 @test "the host name stage read is redacted from task output" {

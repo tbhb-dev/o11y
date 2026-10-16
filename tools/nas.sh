@@ -335,15 +335,20 @@ local_compose() {
   env -i PATH="$PATH" HOME="$HOME" "$O11Y_COMPOSE" "$@"
 }
 
-# read_host_name: the deploy host's own name, read over SSH, for host.name
-# on the stack's own metrics. It is private, so it goes to
-# tmp/deploy/host-name, which redact reads, and never to the output.
+# read_host_name: the deploy host's short name, read over SSH, for host.name
+# on the stack's own metrics, so no setting has to hold it. It is private,
+# so it goes to tmp/deploy/host-name, which redact reads, and never to the
+# output. When it can't be read, or isn't a host name, the release carries
+# unknown-host and the task says so.
 read_host_name() {
-  local name
-  name=$(remote "hostname") || die "$task: the host could not be asked for its name"
-  [[ $name =~ ^[A-Za-z0-9][A-Za-z0-9.-]{0,252}$ ]] || die "$task: the host's name is not a host name"
-  printf '%s\n' "$name" >tmp/deploy/host-name
-  remote_host_name=$name
+  local name label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+  if name=$(remote "hostname -s") && [[ $name =~ ^$label$ ]]; then
+    printf '%s\n' "$name" >tmp/deploy/host-name
+    remote_host_name=$name
+  else
+    echo "WARN $task: the host's short name could not be read, so the stack's own metrics carry host.name unknown-host"
+    remote_host_name=unknown-host
+  fi
 }
 
 # render_release <outdir> <project> <data dir> <Grafana URL> <three ports>:
