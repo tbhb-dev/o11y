@@ -16,6 +16,7 @@ if [[ -z $entries ]]; then
   echo "no active devtools pin found in $manifest" >&2
   exit 1
 fi
+# shellcheck disable=SC2312 # printf and wc over a variable don't fail
 if [[ $(printf '%s\n' "$entries" | wc -l) -ne 1 ]]; then
   echo "expected one active devtools pin in $manifest, found several" >&2
   exit 1

@@ -13,6 +13,7 @@ O11Y_COMPOSE=${O11Y_COMPOSE:-docker-cli-plugin-docker-compose}
 pin_docker_api() {
   local min
   min=$(docker version --format '{{.Server.MinAPIVersion}}')
+  # shellcheck disable=SC2312 # printf, sort and head over two words don't fail
   if [[ $(printf '%s\n' 1.44 "$min" | sort -V | head -n 1) == 1.44 ]]; then
     export DOCKER_API_VERSION=$min
   fi
@@ -34,6 +35,7 @@ isolate_environment() {
 }
 
 host_is_linux() {
+  # shellcheck disable=SC2312 # uname -s doesn't fail
   [[ $(uname -s) == Linux ]]
 }
 
@@ -155,12 +157,31 @@ rustfs_log_ok() {
   ! grep -qiE 'rustfsadmin|is not set|default root credentials|ENOSYS|Function not implemented|Unsupported filesystem' <<<"$log"
 }
 
+# Reads Mimir's /metrics exposition on stdin and prints how many samples it
+# has discarded as otlp_parse_error. Mimir exports no discard series until
+# its first discard, so an absent series counts as zero, but only in text
+# that is Mimir's exposition: anything else fails, so a failed scrape can't
+# pass for no discards.
+otlp_parse_discards() {
+  awk '
+    $0 == "# TYPE cortex_build_info gauge" { mimir = 1 }
+    /^cortex_discarded_samples_total\{/ && /reason="otlp_parse_error"/ {
+      if ($NF !~ /^[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?$/) bad = 1
+      n += $NF
+    }
+    END {
+      if (!mimir || bad) exit 1
+      print n + 0
+    }'
+}
+
 # expect_status <status> <curl arguments...>: the request must complete and
 # answer with exactly that status. A transport failure or any other status
 # fails, so an outage cannot pass for a refusal.
 expect_status() {
   local want=$1 got
   shift
+  # lint-curl: allow the status code is the answer, compared with the wanted one below
   got=$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@") || {
     echo "request failed before any status arrived" >&2
     return 1
@@ -169,6 +190,18 @@ expect_status() {
     echo "expected status $want, got $got" >&2
     return 1
   }
+}
+
+# output_is <expected> <command...>: the command succeeds and prints exactly
+# the expected text. Comparing the output alone passes a command that
+# printed the right answer and then failed, as a dropped connection or a
+# timed-out curl can, and one that failed with nothing when nothing is the
+# answer wanted.
+output_is() {
+  local want=$1 got
+  shift
+  got=$("$@") || return 1
+  [[ $got == "$want" ]]
 }
 
 # sentinel_absent <sentinel> <name=path>...: fails when a file or directory

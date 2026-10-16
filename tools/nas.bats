@@ -204,7 +204,12 @@ exec)
 inspect) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
 run)
   case $all in
-  *"stat -c"*) cat "$STUB/layout" ;;
+  *"stat -c"*)
+    cat "$STUB/layout"
+    # STUB_LAYOUT_THEN_FAILS lists the layout, then fails, as a dropped
+    # connection can.
+    [ -z "${STUB_LAYOUT_THEN_FAILS:-}" ] || exit 255
+    ;;
   *"find /d -mindepth 1"*)
     mounted=${all##* -v }
     mounted=${mounted%%:/d *}
@@ -762,6 +767,19 @@ http://grafana:3000/api/org/preferences' ]
   [[ $output != *"mise run rollback"* ]] || false
 }
 
+# Alloy exits at start when it can't load its config, as it does without the
+# stability level a component needs, and Compose then restarts it.
+@test "an Alloy that keeps restarting fails the health gate and promotes nothing" {
+  healthy o11y
+  sed -i 's/^\(o11y alloy .*\) Up 1 minute (healthy)$/\1 Restarting (1) 5 seconds ago/' "$dir/containers"
+  grep -q '^o11y alloy .* Restarting (1)' "$dir/containers"
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"the containers of o11y did not all come up healthy"* ]] || false
+  [ ! -e "$remote/current" ]
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
 @test "a failed receipt after an earlier deploy promotes nothing, unlocks, and names rollback" {
   healthy o11y
   go deploy
@@ -975,6 +993,14 @@ http://grafana:3000/api/org/preferences' ]
   [[ $output == *"differ from the layout"* ]] || false
 }
 
+@test "gate-test fails when the layout listing prints the expected layout and then fails" {
+  healthy o11y-gate
+  layout
+  STUB_LAYOUT_THEN_FAILS=1 go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"differ from the layout"* ]] || false
+}
+
 @test "gate-clean refuses while an o11y-gate container exists" {
   mkdir -p "$remote/gate/data"
   healthy o11y-gate
@@ -1177,8 +1203,8 @@ STUB
   grep -qE '^receipt.sh --grpc -- docker run --rm --add-host otlp\.example\.ts\.net:192\.0\.2\.20 ghcr\.io/[^ ]+@sha256:[0-9a-f]+ traces --otlp-endpoint otlp\.example\.ts\.net:4317 \[' "$dir/tools.log"
   [ ! -e "$dir/ssh.log" ]
   # Each run also asks for the anonymous home, with no credentials.
-  [ "$(cat "$dir/curl.log")" = "-sS -m 15 https://grafana.example.ts.net/api/dashboards/home
--sS -m 15 https://grafana.example.ts.net/api/dashboards/home" ]
+  [ "$(cat "$dir/curl.log")" = "-fsS -m 15 https://grafana.example.ts.net/api/dashboards/home
+-fsS -m 15 https://grafana.example.ts.net/api/dashboards/home" ]
   [[ $output == *"ok smoke-remote: the anonymous home is the Stack health dashboard"* ]] || false
 }
 

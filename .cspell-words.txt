@@ -24,6 +24,7 @@ buildx
 cgroupfs
 cgroupns
 cksum
+deltatocumulative
 devtools
 dscacheutil
 esac
@@ -67,6 +68,7 @@ tonumber
 toplevel
 traceid
 urandom
+urlencode
 vendir
 venv
 worktree

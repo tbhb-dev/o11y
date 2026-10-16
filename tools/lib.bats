@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# The sentinel search the boot test ends with: it must fail on a leak, name
-# the place and never print the value.
+# The helpers the boot test relies on. The sentinel search must fail on a
+# leak, name the place and never print the value, and a check on output
+# must also fail when its command does.
 
 setup() {
   # shellcheck source=tools/lib.sh
@@ -282,4 +283,59 @@ STUB
     run bash "$BATS_TEST_DIRNAME/nas-rehearsal.sh" --inside
   [ "$status" -ne 0 ]
   [ ! -e "$dir/docker.log" ]
+}
+
+@test "output_is passes a command that succeeds with exactly the expected output" {
+  stub probe
+  STUB_OUT=200 run output_is 200 probe
+  [ "$status" -eq 0 ]
+}
+
+@test "output_is fails a command that prints the expected output and then fails" {
+  stub probe
+  STUB_OUT=200 STUB_EXIT=28 run output_is 200 probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that fails with nothing where nothing is expected" {
+  stub probe
+  STUB_EXIT=1 run output_is '' probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that succeeds with other output" {
+  stub probe
+  STUB_OUT=503 run output_is 200 probe
+  [ "$status" -eq 1 ]
+}
+
+# otlp_parse_discards reads Mimir's own /metrics.
+mimir_exposition() {
+  printf '%s\n' '# HELP cortex_build_info A metric with a constant 1 value.' '# TYPE cortex_build_info gauge' 'cortex_build_info{version="3.2.2"} 1' "$@"
+}
+
+@test "Mimir's exposition without a discard series counts as no discards" {
+  run otlp_parse_discards < <(mimir_exposition)
+  [ "$status" -eq 0 ]
+  [ "$output" = 0 ]
+}
+
+@test "otlp_parse_error discards are summed across their series and other reasons are left out" {
+  run otlp_parse_discards < <(mimir_exposition \
+    'cortex_discarded_samples_total{group="",reason="otlp_parse_error",user="anonymous"} 1' \
+    'cortex_discarded_samples_total{group="a",reason="otlp_parse_error",user="anonymous"} 2' \
+    'cortex_discarded_samples_total{group="",reason="sample_out_of_order",user="anonymous"} 40')
+  [ "$status" -eq 0 ]
+  [ "$output" = 3 ]
+}
+
+@test "an error page is not Mimir's exposition and fails rather than counting as no discards" {
+  run otlp_parse_discards <<<'404 page not found'
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "a discard series without a number fails" {
+  run otlp_parse_discards < <(mimir_exposition 'cortex_discarded_samples_total{reason="otlp_parse_error"} garbage')
+  [ "$status" -ne 0 ]
 }
