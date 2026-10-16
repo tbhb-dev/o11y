@@ -1,11 +1,11 @@
 {
   "uid": "o11y-stack-health",
   "title": "Stack health",
-  "description": "The stack's own services, scraped by Alloy as o11y/<component>. Missing, stale or failed data reads as Unavailable, Down or Stale, never as healthy. Up means the scrape succeeded, not that telemetry was delivered.",
+  "description": "The stack's own services, scraped by Alloy as o11y/<component>, and RustFS, which pushes its metrics over OTLP as o11y/rustfs. Missing, stale or failed data reads as Unavailable, Down or Stale, never as healthy. Up means the scrape succeeded, not that telemetry was delivered.",
   "tags": ["o11y"],
   "timezone": "browser",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "refresh": "1m",
   "time": {
     "from": "now-6h",
@@ -378,6 +378,146 @@
       }
     },
     {
+      "title": "Up: o11y/rustfs",
+      "description": "RustFS pushes its metrics over OTLP every 30 seconds, so there is no scrape to fail. Up while a push arrived within 90 seconds, Unavailable otherwise.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "1": {
+                  "text": "Up",
+                  "color": "green",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max by (job) (rustfs_start_total{job=\"o11y/rustfs\"} and time() - timestamp(rustfs_start_total{job=\"o11y/rustfs\"}) < 90) * 0 + 1",
+          "legendFormat": "{{job}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "id": 6,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      }
+    },
+    {
+      "title": "Last push: o11y/rustfs",
+      "description": "Seconds since RustFS's newest metrics push. Stale from 90 seconds.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable",
+          "unit": "s",
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "range",
+              "options": {
+                "from": 90,
+                "to": 1000000000000.0,
+                "result": {
+                  "text": "Stale",
+                  "color": "red",
+                  "index": 0
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 90
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "time() - max(timestamp(rustfs_start_total{job=\"o11y/rustfs\"}))",
+          "legendFormat": "o11y/rustfs",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "id": 7,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      }
+    },
+    {
       "title": "Last scrape: o11y/alloy",
       "description": "Seconds since the newest up sample. Stale from 90 seconds, when the scrape or the write to Mimir has stopped.",
       "type": "stat",
@@ -443,7 +583,7 @@
           "range": false
         }
       ],
-      "id": 6,
+      "id": 8,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -515,7 +655,7 @@
           "range": false
         }
       ],
-      "id": 7,
+      "id": 9,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -587,7 +727,7 @@
           "range": false
         }
       ],
-      "id": 8,
+      "id": 10,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -659,7 +799,7 @@
           "range": false
         }
       ],
-      "id": 9,
+      "id": 11,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -731,7 +871,7 @@
           "range": false
         }
       ],
-      "id": 10,
+      "id": 12,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -788,7 +928,7 @@
           "range": false
         }
       ],
-      "id": 11,
+      "id": 13,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -845,7 +985,7 @@
           "range": false
         }
       ],
-      "id": 12,
+      "id": 14,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -902,7 +1042,7 @@
           "range": false
         }
       ],
-      "id": 13,
+      "id": 15,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -959,7 +1099,7 @@
           "range": false
         }
       ],
-      "id": 14,
+      "id": 16,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1016,7 +1156,64 @@
           "range": false
         }
       ],
-      "id": 15,
+      "id": 17,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      }
+    },
+    {
+      "title": "Restarts in 1h: o11y/rustfs",
+      "description": "Process starts seen in the last hour. Unavailable unless RustFS pushed within 90 seconds.",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "changes(max(rustfs_system_process_start_time_seconds{job=\"o11y/rustfs\"})[1h:1m]) and on() (time() - timestamp(rustfs_start_total{job=\"o11y/rustfs\"}) < 90)",
+          "legendFormat": "o11y/rustfs",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "id": 18,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1104,9 +1301,16 @@
           "legendFormat": "{{job}}",
           "instant": false,
           "range": true
+        },
+        {
+          "refId": "F",
+          "expr": "max(rustfs_system_process_resident_memory_bytes{job=\"o11y/rustfs\"}) / 805306368",
+          "legendFormat": "o11y/rustfs",
+          "instant": false,
+          "range": true
         }
       ],
-      "id": 16,
+      "id": 19,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1196,7 +1400,7 @@
           "range": true
         }
       ],
-      "id": 17,
+      "id": 20,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1268,7 +1472,7 @@
           "range": false
         }
       ],
-      "id": 18,
+      "id": 21,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1340,7 +1544,7 @@
           "range": false
         }
       ],
-      "id": 19,
+      "id": 22,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1412,7 +1616,7 @@
           "range": false
         }
       ],
-      "id": 20,
+      "id": 23,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1470,7 +1674,7 @@
           "range": false
         }
       ],
-      "id": 21,
+      "id": 24,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1528,7 +1732,7 @@
           "range": false
         }
       ],
-      "id": 22,
+      "id": 25,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1593,7 +1797,7 @@
           "range": false
         }
       ],
-      "id": 23,
+      "id": 26,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1651,7 +1855,136 @@
           "range": false
         }
       ],
-      "id": 24,
+      "id": 27,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      }
+    },
+    {
+      "title": "RustFS self-metrics delivery",
+      "description": "Points the self receiver refused, and points its exporter to Mimir failed to queue or send, per second. Unavailable unless the o11y/alloy job's last scrape succeeded within 90 seconds, so a job that can't be scraped never reads as zero errors.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 18,
+        "y": 25
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable",
+          "unit": "cps",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.001
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "(sum(rate(otelcol_receiver_refused_metric_points_total{job=\"o11y/alloy\", component_id=\"otelcol.receiver.otlp.self\"}[$__rate_interval])) or on() vector(0)) and on() (up{job=\"o11y/alloy\"} == 1 and time() - timestamp(up{job=\"o11y/alloy\"}) < 90)",
+          "legendFormat": "refused",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "expr": "(sum(rate(otelcol_exporter_enqueue_failed_metric_points_total{job=\"o11y/alloy\", component_id=\"otelcol.exporter.otlphttp.mimir_self\"}[$__rate_interval])) or on() vector(0)) and on() (up{job=\"o11y/alloy\"} == 1 and time() - timestamp(up{job=\"o11y/alloy\"}) < 90)",
+          "legendFormat": "enqueue failed",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "C",
+          "expr": "(sum(rate(otelcol_exporter_send_failed_metric_points_total{job=\"o11y/alloy\", component_id=\"otelcol.exporter.otlphttp.mimir_self\"}[$__rate_interval])) or on() vector(0)) and on() (up{job=\"o11y/alloy\"} == 1 and time() - timestamp(up{job=\"o11y/alloy\"}) < 90)",
+          "legendFormat": "send failed",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "id": 28,
+      "datasource": {
+        "type": "prometheus",
+        "uid": "mimir"
+      }
+    },
+    {
+      "title": "RustFS series",
+      "description": "Series RustFS sent in the last five minutes, after the allowlist. Unavailable unless RustFS pushed within 90 seconds.",
+      "type": "stat",
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 30
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Unavailable",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 500
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": ["lastNotNull"],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "count({job=\"o11y/rustfs\"}) and on() (time() - timestamp(rustfs_start_total{job=\"o11y/rustfs\"}) < 90)",
+          "legendFormat": "series",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "id": 29,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"
@@ -1664,8 +1997,8 @@
       "gridPos": {
         "h": 5,
         "w": 6,
-        "x": 18,
-        "y": 25
+        "x": 6,
+        "y": 30
       },
       "fieldConfig": {
         "defaults": {
@@ -1708,7 +2041,7 @@
           "range": false
         }
       ],
-      "id": 25,
+      "id": 30,
       "datasource": {
         "type": "prometheus",
         "uid": "mimir"

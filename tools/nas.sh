@@ -84,6 +84,7 @@ locked=0
 gate_release=
 swap_pending=
 model=
+remote_host_name=
 free_kb=
 total_kb=
 
@@ -285,14 +286,17 @@ cleanup() {
 # placeholders, and tailnet addresses become <tailnet address>. The raw
 # output stays in the task log.
 redact() {
-  local line entry entries=() private='<private>'
+  local line entry entries=() private='<private>' node=
+  # The host's own name, which stage and gate-test read over SSH.
+  [[ ! -f tmp/deploy/host-name ]] || node=$(<tmp/deploy/host-name)
   # shellcheck disable=SC2016 # the placeholders are the variable names
-  local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST'
+  local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST' node_name='<host name>'
   IFS=, read -r -a entries <<<"${O11Y_PRIVATE_STRINGS:-}"
   while IFS= read -r line || [[ -n $line ]]; do
     [[ -z ${O11Y_REMOTE_DIR:-} ]] || line=${line//"$O11Y_REMOTE_DIR"/$dir_name}
     [[ -z ${O11Y_TAILNET_DOMAIN:-} ]] || line=${line//"$O11Y_TAILNET_DOMAIN"/$domain_name}
     [[ -z ${O11Y_SSH_HOST:-} ]] || line=${line//"$O11Y_SSH_HOST"/$host_name}
+    [[ ${#node} -lt 4 ]] || line=${line//"$node"/$node_name}
     for entry in ${entries[@]+"${entries[@]}"}; do
       [[ ${#entry} -lt 4 ]] || line=${line//"$entry"/$private}
     done
@@ -337,6 +341,22 @@ local_compose() {
   env -i PATH="$PATH" HOME="$HOME" "$O11Y_COMPOSE" "$@"
 }
 
+# read_host_name: the deploy host's short name, read over SSH, for host.name
+# on the stack's own metrics, so no setting has to hold it. It is private,
+# so it goes to tmp/deploy/host-name, which redact reads, and never to the
+# output. When it can't be read, or isn't a host name, the release carries
+# unknown-host and the task says so.
+read_host_name() {
+  local name label='[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?'
+  if name=$(remote "hostname -s") && [[ $name =~ ^$label$ ]]; then
+    printf '%s\n' "$name" >tmp/deploy/host-name
+    remote_host_name=$name
+  else
+    echo "WARN $task: the host's short name could not be read, so the stack's own metrics carry host.name unknown-host"
+    remote_host_name=unknown-host
+  fi
+}
+
 # render_release <outdir> <project> <data dir> <Grafana URL> <three ports>:
 # renders for the host and checks that the three models load.
 render_release() {
@@ -345,6 +365,10 @@ render_release() {
     unset O11Y_SECRETS_OWNER
     export O11Y_DATA_DIR=$3 O11Y_GRAFANA_ROOT_URL=$4
     export O11Y_GRAFANA_PORT=$5 O11Y_OTLP_GRPC_PORT=$6 O11Y_OTLP_HTTP_PORT=$7
+    # The deployment.environment.name the stack stamps on its own metrics.
+    if [[ $project == o11y-gate ]]; then export O11Y_ENVIRONMENT=gate; else export O11Y_ENVIRONMENT=production; fi
+    # deploy-plan reads no host, and renders the default.
+    if [[ -n $remote_host_name ]]; then export O11Y_HOST_NAME=$remote_host_name; else unset O11Y_HOST_NAME; fi
     tools/render.sh "$out" --config-root "$dir/config"
   ) || die "$task: render failed"
   for file in compose.yaml compose.init.yaml compose.tools.yaml; do
@@ -428,6 +452,7 @@ upload_configs() {
 
 stage() {
   local id out
+  read_host_name
   id=$(new_release_id)
   out=tmp/deploy/$id
   render_release "$out" o11y "$dir/data" "https://grafana.$O11Y_TAILNET_DOMAIN/" "$grafana_port" "$grpc_port" "$http_port"
@@ -939,6 +964,7 @@ s3probe /usr/local/bin/aws --version"
 gate_test() {
   local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code layout
   disk_gate
+  read_host_name
   id=$(new_release_id)
   out=tmp/deploy/gate-$id
   release=$dir/gate/releases/$id

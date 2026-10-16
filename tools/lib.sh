@@ -154,7 +154,61 @@ rustfs_log_ok() {
   local log
   log=$(cat)
   grep -q '"console_enabled":false' <<<"$log" || return 1
-  ! grep -qiE 'rustfsadmin|is not set|default root credentials|ENOSYS|Function not implemented|Unsupported filesystem' <<<"$log"
+  lacks -iE 'rustfsadmin|is not set|default root credentials|ENOSYS|Function not implemented|Unsupported filesystem' <<<"$log"
+}
+
+# lacks <grep arguments...>: 0 when no line of stdin matches, 1 when one
+# does, 2 when grep itself fails. It reads all of its input, so a command
+# feeding it never gets SIGPIPE. `! grep -q` reads a failed grep as no
+# match, and stops reading at the first match, which under pipefail turns
+# the upstream SIGPIPE into a pass.
+lacks() {
+  local status=0
+  grep "$@" >/dev/null || status=$?
+  case $status in
+  0) return 1 ;;
+  1) return 0 ;;
+  *) return 2 ;;
+  esac
+}
+
+# json_after_start: reads a RustFS log on stdin, all of it. 0 when every
+# line after its first "Starting: " entrypoint line is a JSON log line, 3
+# when one isn't, such as an exporter dump, 4 when there is no start line,
+# and anything else when awk itself fails.
+json_after_start() {
+  awk '{ sub(/\r$/, "") } started && !/^\{/ { bad = 1 } /^Starting: / { started = 1 }
+    END { exit bad ? 3 : (started ? 0 : 4) }'
+}
+
+# files_differ <a> <b>: 0 when the two files differ, 1 when they are the
+# same, 2 when cmp can't compare them. `! cmp -s` reads a comparison
+# error as a difference.
+files_differ() {
+  local status=0
+  cmp -s "$1" "$2" || status=$?
+  case $status in
+  1) return 0 ;;
+  0) return 1 ;;
+  *) return 2 ;;
+  esac
+}
+
+# expected_up_jobs <config.alloy>: the jobs a release's Up panels must show,
+# one per line: every scrape job, plus o11y/rustfs from the release that
+# added the self receiver on. Fails when the config can't be read or names
+# no job, rather than printing a shorter list.
+expected_up_jobs() {
+  local jobs status=0
+  jobs=$(grep -o '"job" = "[^"]*"' "$1") || return 1
+  jobs=$(cut -d'"' -f4 <<<"$jobs") || return 1
+  grep -q '^otelcol.receiver.otlp "self"' "$1" || status=$?
+  case $status in
+  0) jobs+=$'\no11y/rustfs' ;;
+  1) ;;
+  *) return 1 ;;
+  esac
+  printf '%s\n' "$jobs"
 }
 
 # Reads Mimir's /metrics exposition on stdin and prints how many samples it

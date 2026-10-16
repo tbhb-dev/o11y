@@ -134,6 +134,24 @@ else
   add_needle "O11Y_TAILNET_DOMAIN (first label)" "${O11Y_TAILNET_DOMAIN%%.*}"
 fi
 
+# The deploy host's own name, stamped on the stack's metrics. No setting
+# holds it: stage and gate-test read it over SSH into tmp/deploy/host-name,
+# in the checkout they run from, which may be this one or the main one.
+checkout=$(git rev-parse --show-toplevel 2>/dev/null || true)
+common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)
+main_checkout=
+[[ -z $common ]] || main_checkout=$(cd "$common/.." && pwd)
+for dir in "$checkout" "$main_checkout"; do
+  if [[ -n $dir && -f $dir/tmp/deploy/host-name ]]; then
+    # A name that can't be read can't be checked, so the scan can't pass.
+    host_name=$(cat -- "$dir/tmp/deploy/host-name" 2>/dev/null) || {
+      echo "check-leaks: the deploy host's name in tmp/deploy/host-name could not be read" >&2
+      exit 2
+    }
+    add_needle "the deploy host's name (tmp/deploy/host-name)" "$host_name"
+  fi
+done
+
 # The cluster label is a site name only when the owner sets one. Its
 # default, o11y, is this project's own name and appears everywhere.
 if [[ -n ${O11Y_CLUSTER-} && $O11Y_CLUSTER != o11y ]]; then

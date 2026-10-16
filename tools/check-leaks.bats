@@ -48,7 +48,7 @@ no_value() {
 # that none of them appears in the output, so redaction is tested in every
 # case, not only in the ones that remember to.
 secrets=(zebra-host-01 /zq/stash/dir /zq/bin/tsc quokka-pond 203.0.113.77 kestrel99
-  mango-secret wombat-site 10.1.2.3 100.100.1.2 100.64.0.9 100.127.255.1 fd7a:115c:a1e0
+  mango-secret wombat-site wombat-node 10.1.2.3 100.100.1.2 100.64.0.9 100.127.255.1 fd7a:115c:a1e0
   172.16.0.5 172.31.9.9 192.168.1.1 other-example box.other-net foo.ts.net)
 
 no_secrets() {
@@ -95,6 +95,33 @@ run_check() {
     [[ $output == *"leak.md:2: private literal $name"* ]]
     no_value "$value"
   done
+}
+
+@test "a deploy host's name that can't be read stops the scan with status 2, and names nothing" {
+  printf '%s\n' tmp/ >>.gitignore
+  mkdir -p tmp/deploy
+  printf 'wombat-node\n' >tmp/deploy/host-name
+  chmod 000 tmp/deploy/host-name
+  [[ ! -r tmp/deploy/host-name ]] || skip "runs as a user who can read any file"
+  printf 'host wombat-node\n' >leak.md
+  git add .gitignore leak.md
+  run_check
+  chmod 600 tmp/deploy/host-name
+  [ "$status" -eq 2 ]
+  [[ $output == *"the deploy host's name in tmp/deploy/host-name could not be read"* ]]
+  no_value wombat-node
+}
+
+@test "the deploy host's name that stage read is a private literal" {
+  printf '%s\n' tmp/ >>.gitignore
+  mkdir -p tmp/deploy
+  printf 'wombat-node\n' >tmp/deploy/host-name
+  printf 'host wombat-node\n' >leak.md
+  git add .gitignore leak.md
+  run_check
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.md:1: private literal the deploy host's name (tmp/deploy/host-name)"* ]]
+  no_value wombat-node
 }
 
 @test "a cluster name the owner sets is a private literal, and the default is not" {

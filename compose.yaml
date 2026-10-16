@@ -48,6 +48,19 @@ services:
       RUSTFS_SECRET_KEY_FILE: /run/o11y/rustfs.secret_key
       RUSTFS_OBS_LOG_DIRECTORY: ""
       RUSTFS_OBS_LOGGER_LEVEL: info
+      # Metrics go to Alloy's unpublished self receiver. An empty endpoint
+      # would force RustFS's OpenTelemetry stdout exporters on, so it is set
+      # here, and the stdout settings are explicit because their defaults
+      # change outside production. The application log stays on stdout as
+      # JSON; traces, OTLP logs and profiles are not exported.
+      RUSTFS_OBS_ENDPOINT: http://alloy:4320
+      RUSTFS_OBS_ENVIRONMENT: production
+      RUSTFS_OBS_SERVICE_NAME: rustfs
+      RUSTFS_OBS_USE_STDOUT: "false"
+      RUSTFS_OBS_LOG_STDOUT_ENABLED: "true"
+      RUSTFS_OBS_TRACES_EXPORT_ENABLED: "false"
+      RUSTFS_OBS_LOGS_EXPORT_ENABLED: "false"
+      RUSTFS_OBS_PROFILING_EXPORT_ENABLED: "false"
       RUSTFS_SCANNER_SPEED: slow
       RUSTFS_SCANNER_CYCLE: "3600"
       RUSTFS_UNSUPPORTED_FS_POLICY: fail
@@ -128,6 +141,11 @@ services:
     environment:
       GOMEMLIMIT: 600MiB
       O11Y_CLUSTER: ${O11Y_CLUSTER:-o11y}
+      # Stamped on the stack's own OTLP metrics in place of whatever a
+      # container reports. Stage and gate-test read the host name over SSH,
+      # and it is private.
+      O11Y_HOST_NAME: ${O11Y_HOST_NAME:-unknown-host}
+      O11Y_ENVIRONMENT: ${O11Y_ENVIRONMENT:-production}
     stop_grace_period: 30s
     volumes:
       - ${O11Y_CONFIG_ALLOY:?}:/etc/alloy:ro
