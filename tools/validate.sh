@@ -176,7 +176,7 @@ below_ga() {
 # component. At the default level Alloy exits 1 and names every component
 # below it, and the one it names must be the one the level was lowered for.
 status=0
-# shellcheck disable=SC2312 # a missing config directory fails docker run, so the check fails
+# shellcheck disable=SC2312 # config_dir only reads config_lines, read above with its status
 run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy || status=$?
 if [[ $status -eq 0 ]]; then
   echo "FAIL alloy: config.alloy passes at the default stability level, so $alloy_stability is not needed" >&2
