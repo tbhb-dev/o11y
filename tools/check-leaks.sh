@@ -143,7 +143,12 @@ main_checkout=
 [[ -z $common ]] || main_checkout=$(cd "$common/.." && pwd)
 for dir in "$checkout" "$main_checkout"; do
   if [[ -n $dir && -f $dir/tmp/deploy/host-name ]]; then
-    add_needle "the deploy host's name (tmp/deploy/host-name)" "$(<"$dir/tmp/deploy/host-name")"
+    # A name that can't be read can't be checked, so the scan can't pass.
+    host_name=$(cat -- "$dir/tmp/deploy/host-name" 2>/dev/null) || {
+      echo "check-leaks: the deploy host's name in tmp/deploy/host-name could not be read" >&2
+      exit 2
+    }
+    add_needle "the deploy host's name (tmp/deploy/host-name)" "$host_name"
   fi
 done
 

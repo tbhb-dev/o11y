@@ -97,6 +97,21 @@ run_check() {
   done
 }
 
+@test "a deploy host's name that can't be read stops the scan with status 2, and names nothing" {
+  printf '%s\n' tmp/ >>.gitignore
+  mkdir -p tmp/deploy
+  printf 'wombat-node\n' >tmp/deploy/host-name
+  chmod 000 tmp/deploy/host-name
+  [[ ! -r tmp/deploy/host-name ]] || skip "runs as a user who can read any file"
+  printf 'host wombat-node\n' >leak.md
+  git add .gitignore leak.md
+  run_check
+  chmod 600 tmp/deploy/host-name
+  [ "$status" -eq 2 ]
+  [[ $output == *"the deploy host's name in tmp/deploy/host-name could not be read"* ]]
+  no_value wombat-node
+}
+
 @test "the deploy host's name that stage read is a private literal" {
   printf '%s\n' tmp/ >>.gitignore
   mkdir -p tmp/deploy
