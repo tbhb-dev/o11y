@@ -39,7 +39,9 @@
 #   for every field, and any line outside it fails the check. The grammar
 #   accepts what the kernel, GNU, BusyBox and DSM print. Malformation those
 #   never produce is covered only as far as the grammar reaches, and
-#   nothing further is promised.
+#   nothing further is promised. One real shape fails it: a mount table
+#   line with an unescaped space in its options, as some old CIFS mounts
+#   wrote, stops R1 or R2 rather than passing.
 #
 # docker inspect only ever takes a -f template, and no template names
 # Config.Env. The host side keeps to bash 3.2: no associative arrays and no
@@ -47,7 +49,7 @@
 # temporary file; values reach a command through printf and a pipe or a
 # process substitution instead. The readers run in the Alloy image's bash,
 # started through env -i with a fixed PATH and no startup files.
-# cspell:ignore rstart synoacl tolower
+# cspell:ignore cifs iface rstart synoacl tolower
 # cspell:ignore aufs devicemapper gelf hostconfig logdrv mountinfo noprofile norc overlayfs rootfs rprivate rwro rwxs tmpfs trunc unbindable
 set -euo pipefail
 exec 3>&2 2>/dev/null
@@ -464,10 +466,9 @@ found=$(printf '%s\n' "$l" | awk -v tool="$tool" '
     for (k = 1; k <= n; k++) if (g[k] !~ /^[0-9A-Fa-f]+$/ || length(g[k]) > 4) return -1
     return n
   }
-  # v6: eight groups, or at most seven around one ::, after an optional
-  # %interface; or the ::ffff: form of an IPv4 address.
+  # v6: eight groups, or at most seven around one ::; or the ::ffff: form
+  # of an IPv4 address.
   function v6(h,   d, l, r) {
-    sub(/%[A-Za-z0-9_.-]+$/, "", h)
     if (tolower(h) ~ /^::ffff:/ && v4(substr(h, 8))) return 1
     if (h !~ /^[0-9A-Fa-f:]+$/) return 0
     d = index(h, "::")
@@ -478,12 +479,26 @@ found=$(printf '%s\n' "$l" | awk -v tool="$tool" '
     return l >= 0 && r >= 0 && l + r <= 7
   }
   # addr <token> <remote>: 1 when the token is an address and port; sets
-  # host to the address part.
-  function addr(a, remote,   port) {
+  # host to the address part, without its interface. One %interface of
+  # letters, digits, _, . and - may follow any address: after it, as ss
+  # prints 127.0.0.53%lo:53 and [fe80::1]%eth0:443, or inside the
+  # brackets, as in [fe80::1%eth0]:443. It comes off before the address
+  # family is checked.
+  function addr(a, remote,   port, i, iface) {
     if (!match(a, /:[^:]*$/)) return 0
     host = substr(a, 1, RSTART - 1)
     port = substr(a, RSTART + 1)
     if (!(remote && port == "*") && (port !~ /^[1-9][0-9]*$/ || length(port) > 5 || port + 0 > 65535)) return 0
+    if (i = index(host, "%")) {
+      iface = substr(host, i + 1)
+      if (host ~ /^\[/ && iface ~ /\]$/) {
+        iface = substr(iface, 1, length(iface) - 1)
+        host = substr(host, 1, i - 1) "]"
+      } else {
+        host = substr(host, 1, i - 1)
+      }
+      if (iface !~ /^[A-Za-z0-9_.-]+$/) return 0
+    }
     if (host == "*" || v4(host)) return 1
     if (host ~ /^\[.*\]$/) return v6(substr(host, 2, length(host) - 2))
     return v6(host)

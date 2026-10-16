@@ -8,7 +8,7 @@
 # request. Every run asserts that no private value reached the output: the
 # test directory holds the data root, and every private value the stubs
 # print contains the word private.
-# cspell:ignore cachedev devtmpfs drrrrrrrrr drwxr drwxrwxrwx inodes nodev noexec nosuid rootfs rwxr subvol subvolid syno unbindable
+# cspell:ignore cachedev devtmpfs feab drrrrrrrrr drwxr drwxrwxrwx inodes nodev noexec nosuid rootfs rwxr subvol subvolid syno unbindable
 # cspell:ignore compgen drwx hostconfig logconfig mountinfo noprofile norc relatime rprivate statx submount tmpfs versinfo
 
 setup() {
@@ -728,9 +728,13 @@ listeners() {
     "LISTEN 0      128             [::]:22            [::]:*" \
     "LISTEN 0      128                *:8080             *:*" \
     "LISTEN 0      128   [::ffff:127.0.0.1]:9000       *:*" \
-    "LISTEN 0      128  [fe80::1%eth0]:9100          [::]:*"
+    "LISTEN 0      128  [fe80::1%eth0]:9100          [::]:*" \
+    "LISTEN 0      4096   127.0.0.53%lo:53         0.0.0.0:*" \
+    "LISTEN 0      128   [fe80::211:32ff:feab:1234]%eth0:443 [::]:*" \
+    "LISTEN 0      128   0.0.0.0%eth0:8443         0.0.0.0:*"
   facts
-  [[ $output == *"A5 tcp-ports-on-all-addresses 22 8080"* ]]
+  [ "$status" -eq 0 ]
+  [[ $output == *"A5 tcp-ports-on-all-addresses 22 8080 8443"* ]]
 }
 
 @test "an older ss header without Process passes" {
@@ -756,7 +760,10 @@ listeners() {
     "tcp 0 0 0.0.0.0:22 private LISTEN" "tcp 0 0 300.1.1.1:22 0.0.0.0:* LISTEN" "tcp 0 0 0.0.0.0:22 0.0.0.0:22x LISTEN" \
     "tcp 0 0 [::1:22 :::* LISTEN" "tcp 0 0 0.0.0.0:* 0.0.0.0:* LISTEN" "tcp 01 0 0.0.0.0:22 0.0.0.0:* LISTEN" \
     "tcp 0 0 a:b:22 0.0.0.0:* LISTEN" "tcp 0 0 [:::]:22 0.0.0.0:* LISTEN" "tcp 0 0 1::2::3:22 0.0.0.0:* LISTEN" \
-    "tcp 0 0 12345::1:22 0.0.0.0:* LISTEN" "tcp 0 0 1:2:3:4:5:6:7:8:9:22 0.0.0.0:* LISTEN"; do
+    "tcp 0 0 12345::1:22 0.0.0.0:* LISTEN" "tcp 0 0 1:2:3:4:5:6:7:8:9:22 0.0.0.0:* LISTEN" \
+    "tcp 0 0 127.0.0.1%:53 0.0.0.0:* LISTEN" "tcp 0 0 127.0.0.1%e/th0:53 0.0.0.0:* LISTEN" \
+    "tcp 0 0 127.0.0.1%lo%x:53 0.0.0.0:* LISTEN" "tcp6 0 0 [fe80::1]%:443 :::* LISTEN" \
+    "tcp6 0 0 [fe80::1%]:443 :::* LISTEN" "tcp6 0 0 fe80::1%eth0]:443 :::* LISTEN"; do
     listeners netstat "$header" "$row"
     facts
     failed "FAIL A5: the listener table has an unexpected shape"
