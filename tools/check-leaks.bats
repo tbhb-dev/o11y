@@ -1138,6 +1138,18 @@ push_blocked() {
   [ "$status" -eq 0 ]
 }
 
+@test "the installer check fails when reading the hook prints it and then fails" {
+  hook_repo
+  hooks=$(git rev-parse --git-path hooks)
+  bash tools/install-pre-push.sh --check
+  real=$(command -v cat)
+  mkdir "$BATS_TEST_TMPDIR/bin"
+  printf '#!/bin/sh\ncase "$1" in */pre-push) %s "$1"; exit 1 ;; esac\nexec %s "$@"\n' "$real" "$real" >"$BATS_TEST_TMPDIR/bin/cat"
+  chmod +x "$BATS_TEST_TMPDIR/bin/cat"
+  PATH="$BATS_TEST_TMPDIR/bin:$PATH" run bash tools/install-pre-push.sh --check
+  [ "$status" -eq 1 ]
+}
+
 @test "the installer refuses to wrap a hook it doesn't know" {
   hook_repo
   hooks=$(git rev-parse --git-path hooks)

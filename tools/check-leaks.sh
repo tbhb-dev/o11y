@@ -272,6 +272,7 @@ esc() {
 # has_nul FILE: true when the file holds a NUL byte.
 has_nul() {
   # fd 2 goes first so a failed open of the file can't print its name.
+  # shellcheck disable=SC2312 # emit_body reads the file next, and fails there on one that can't be read
   (($(tr -d '\0' 2>/dev/null <"$1" | wc -c) != $(wc -c 2>/dev/null <"$1")))
 }
 
@@ -286,12 +287,14 @@ emit_body() {
 
 # emit_path PATH: a path as text of its own.
 emit_path() {
+  # shellcheck disable=SC2312 # esc only rewrites the text
   printf '\002%s\n' "$(esc "$1")"
 }
 
 # emit_file LABEL FILE: a path and the file's content.
 emit_file() {
   emit_path "$1"
+  # shellcheck disable=SC2312 # esc only rewrites the text
   printf '\001%s\n' "$(esc "$1")"
   emit_body "$2"
 }
@@ -429,7 +432,9 @@ add_objects() {
 
 # Refuse a shallow repository: its boundary commits hide history.
 require_complete() {
-  if [[ $(git rev-parse --is-shallow-repository) != false ]]; then
+  local shallow
+  shallow=$(git rev-parse --is-shallow-repository)
+  if [[ $shallow != false ]]; then
     die "the repository is shallow, so the scan can't be complete"
   fi
 }
@@ -465,6 +470,7 @@ emit_pre_push() {
       fi
       count=$((count + 1))
       # Ref names are text that gets published.
+      # shellcheck disable=SC2312 # esc only rewrites the text
       printf '\002%s\n' "$(esc "$lref")" "$(esc "$rref")"
       # A deletion sends no objects.
       if [[ ! $loid =~ ^0+$ ]]; then
@@ -534,7 +540,8 @@ while (($#)); do
 done
 
 if [[ $mode != files ]]; then
-  cd "$(git rev-parse --show-toplevel)"
+  top=$(git rev-parse --show-toplevel)
+  cd "$top"
 fi
 
 case $mode in

@@ -68,7 +68,8 @@ manifest() {
   (
     cd "$1"
     find . -type f ! -name MANIFEST.sha256 | LC_ALL=C sort | while IFS= read -r file; do
-      printf '%s  %s\n' "$(sha256 <"$file")" "$file"
+      sum=$(sha256 <"$file") || exit 1
+      printf '%s  %s\n' "$sum" "$file"
     done
   )
 }
@@ -96,6 +97,7 @@ printf 'AWS_ACCESS_KEY_ID=dummy-not-a-secret\nAWS_SECRET_ACCESS_KEY=dummy-not-a-
       # Containers running as other users read these after a transfer.
       chmod -R u=rwX,go=rX "$outdir/config/$target"
     fi
+    # shellcheck disable=SC2312 # tr over a word doesn't fail
     printf 'O11Y_CONFIG_%s=%s\n' "$(tr '[:lower:]' '[:upper:]' <<<"$name")" "$config_root/$target"
   done
 } >"$release/.env.validate"
