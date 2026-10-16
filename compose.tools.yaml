@@ -1,7 +1,7 @@
 ---
-# Test-only services. Both sit behind the "tools" profile, so `up` never
-# starts them; the test scripts run them with `run --rm` on the stack's
-# network.
+# Test-only services. All sit behind the "tools" profile, so `up` never
+# starts them; the test scripts run them with `run --rm`, or start them
+# by name, on the stack's network.
 name: o11y
 
 x-logging: &logging
@@ -28,3 +28,38 @@ services:
     entrypoint: ["/bin/sh", "/probe/probe.sh"]
     volumes:
       - ${O11Y_CONFIG_PROBE:?}:/probe:ro
+
+  # A stand-in for Discord's webhook endpoint, for the boot test: busybox
+  # httpd runs a CGI script that appends each request's path and body to
+  # /tmp/posts and answers 204, as Discord does.
+  alert-stub:
+    image: busybox:1.37.0@sha256:bdf57e528e45e4433820e045b29b4597825a1c9e38353532d90a01445013f82e
+    profiles: ["tools"]
+    restart: "no"
+    logging: *logging
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mkdir -p /www/cgi-bin &&
+        printf '%s\n' '#!/bin/sh'
+        '{ echo "path=$$PATH_INFO"; head -c "$${CONTENT_LENGTH:-0}"; echo; } >>/tmp/posts'
+        "printf 'Status: 204 No Content\\r\\n\\r\\n'" >/www/cgi-bin/hook &&
+        chmod 755 /www/cgi-bin/hook &&
+        exec httpd -f -p 8080 -h /www
+
+  # A stand-in for the SMTP server, for the boot test: Mailpit, requiring
+  # STARTTLS on a certificate it makes for itself, with one login whose
+  # password is the test's sentinel, held here only as its bcrypt hash.
+  # Its API on 8025 lists what arrived.
+  # cspell:ignore Yjgzn HQAQVKSEZ
+  alert-mail:
+    image: axllent/mailpit:v1.31.0@sha256:c96991d9bef73594c246d89ca81411d4e916f03e76a7d2d72fa2ab5dd3c9ce24
+    profiles: ["tools"]
+    restart: "no"
+    logging: *logging
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        printf '%s\n' 'smoke-user:$$2y$$10$$w4Wlj/fiwYjgznKggZ1WqOrGqGsI.DzJtHQAQVKSEZGhK44Ado5vW' >/tmp/smtp-auth &&
+        exec /mailpit --smtp-auth-file /tmp/smtp-auth --smtp-require-starttls
+        --smtp-tls-cert sans:alert-mail --smtp-tls-key sans:alert-mail

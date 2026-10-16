@@ -28,6 +28,9 @@
 #   grafana-password is the one deliberate exception, and deploy's home
 #   dashboard call pipes the Grafana password into curl's config on the host,
 #   never onto a command line or off the host.
+# - The Discord webhook URL and the SMTP password for alerts go from
+#   `op read` straight to the host on stdin, never into a variable, file or
+#   argument on either side.
 # - --remove-orphans is passed only with compose.yaml alone. With the init
 #   or tools file it would remove the running stack.
 #
@@ -47,7 +50,16 @@
 #   O11Y_HEALTH_TIMEOUT    seconds each health wait may take (300)
 #   O11Y_DISK_RESERVE_GB   free space preflight, gate-test and deploy require
 #                          under O11Y_REMOTE_DIR, in GiB (50), on top of 10
-#                          percent of the filesystem
+#                          percent of the filesystem; the disk alert uses it
+#   O11Y_ALERT_DISCORD_WEBHOOK_REF
+#                          the 1Password secret reference that `op read`
+#                          resolves to the Discord webhook URL, for deploy
+#   O11Y_ALERT_EMAIL_TO    the recipient of email alerts; email is off when
+#                          it is empty, and render.sh checks the SMTP
+#                          settings that come with it
+#   O11Y_ALERT_SMTP_PASSWORD_REF
+#                          the same for the SMTP password, needed with
+#                          O11Y_ALERT_EMAIL_TO
 #
 # Output is variable names, release ids and pass or fail lines. Everything
 # a task prints goes to tmp/deploy/<task>.log, and the remote diagnostics it
@@ -129,6 +141,13 @@ need() {
       need_port O11Y_OTLP_GRPC_PORT "$grpc_port"
       need_port O11Y_OTLP_HTTP_PORT "$http_port"
       ;;
+    alert)
+      [[ -n ${O11Y_ALERT_DISCORD_WEBHOOK_REF:-} ]] ||
+        die "$task: O11Y_ALERT_DISCORD_WEBHOOK_REF must name the 1Password secret reference of the Discord webhook URL"
+      [[ -z ${O11Y_ALERT_EMAIL_TO:-} || -n ${O11Y_ALERT_SMTP_PASSWORD_REF:-} ]] ||
+        die "$task: O11Y_ALERT_SMTP_PASSWORD_REF must name the 1Password secret reference of the SMTP password, since O11Y_ALERT_EMAIL_TO is set"
+      command -v op >/dev/null || die "$task: the 1Password CLI, op, is not on PATH, and it reads the alert secrets"
+      ;;
     esac
   done
 }
@@ -192,11 +211,17 @@ of_project() {
   echo "--filter label=com.docker.compose.project=$1"
 }
 
-# util_cmd <host dir> <script>: root in a utility container with no network
-# and the directory at /d. It can reach the secret files, so it keeps no log.
+# util_cmd [-i] <host dir> <script>: root in a utility container with no
+# network and the directory at /d, reading stdin with -i. It can reach the
+# secret files, so it keeps no log.
 util_cmd() {
+  local stdin=
+  [[ $1 != -i ]] || {
+    stdin=" -i"
+    shift
+  }
   # shellcheck disable=SC2312 # q only quotes, and image_of reads the model load_model checked
-  echo "$docker run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $1:/d $(image_of init) -c $(q "$2")"
+  echo "$docker run --rm$stdin --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $1:/d $(image_of init) -c $(q "$2")"
 }
 
 # Exits 1 when the lock is taken, 3 when the directory can't be made.
@@ -291,8 +316,14 @@ redact() {
   [[ ! -f tmp/deploy/host-name ]] || node=$(<tmp/deploy/host-name)
   # shellcheck disable=SC2016 # the placeholders are the variable names
   local dir_name='$O11Y_REMOTE_DIR' domain_name='$O11Y_TAILNET_DOMAIN' host_name='$O11Y_SSH_HOST' node_name='<host name>'
+  # The alert settings that name an account, each replaced by its name.
+  local alert value alerts=(O11Y_ALERT_DISCORD_WEBHOOK_REF O11Y_ALERT_SMTP_PASSWORD_REF O11Y_ALERT_EMAIL_TO O11Y_ALERT_SMTP_USER O11Y_ALERT_SMTP_FROM)
   IFS=, read -r -a entries <<<"${O11Y_PRIVATE_STRINGS:-}"
   while IFS= read -r line || [[ -n $line ]]; do
+    for alert in "${alerts[@]}"; do
+      value=${!alert:-}
+      [[ ${#value} -lt 4 ]] || line=${line//"$value"/"\$$alert"}
+    done
     [[ -z ${O11Y_REMOTE_DIR:-} ]] || line=${line//"$O11Y_REMOTE_DIR"/$dir_name}
     [[ -z ${O11Y_TAILNET_DOMAIN:-} ]] || line=${line//"$O11Y_TAILNET_DOMAIN"/$domain_name}
     [[ -z ${O11Y_SSH_HOST:-} ]] || line=${line//"$O11Y_SSH_HOST"/$host_name}
@@ -610,6 +641,41 @@ data_cmd() {
   echo "mkdir -p -m 755 $dir/data"
 }
 
+webhook_re='^https://(discord\.com|discordapp\.com)/api/webhooks/[0-9]+/[A-Za-z0-9_-]+$'
+smtp_password_re='^[[:print:]]+$'
+
+# secret_cmd <file> <pattern>: a secret from stdin into the file under
+# data/secrets that Grafana reads, owned and readable by Grafana's user
+# alone, as init leaves the Grafana password. Line ends are dropped, and a
+# value the extended pattern doesn't match replaces nothing. The rename
+# keeps a running Grafana on the file it mounted.
+secret_cmd() {
+  # shellcheck disable=SC2312 # q only quotes
+  util_cmd -i "$dir/data" "umask 077; f=/d/secrets/$1; t=/d/secrets/.tmp.$1; tr -d '\r\n' >\$t && grep -Eq $(q "$2") \$t && chown 472:472 \$t && chmod 400 \$t && mv \$t \$f || { rm -f \$t; exit 1; }"
+}
+
+# send_secret <reference variable> <file> <pattern> <what> <refusal>: op's
+# output goes to the host's stdin, so nothing on this machine holds the
+# value. A locked 1Password fails here, and so does a value the host
+# refuses.
+send_secret() {
+  local cmd
+  cmd=$(secret_cmd "$2" "$3")
+  op read --no-newline "${!1}" 2>>"$diagnostics_log" | quiet remote_stdin "$cmd" || {
+    echo "FAIL $task: $4 could not be read from 1Password, or the host refused it as $5; see $diagnostics_log" >&2
+    return 1
+  }
+}
+
+# send_secrets: the webhook URL always, the SMTP password with email on.
+send_secrets() {
+  send_secret O11Y_ALERT_DISCORD_WEBHOOK_REF alert_discord_webhook_url "$webhook_re" \
+    "the Discord webhook URL" "not a Discord webhook URL" || return 1
+  [[ -z ${O11Y_ALERT_EMAIL_TO:-} ]] ||
+    send_secret O11Y_ALERT_SMTP_PASSWORD_REF alert_smtp_password "$smtp_password_re" \
+      "the SMTP password" "empty or not printable"
+}
+
 up_cmd() {
   # shellcheck disable=SC2312 # the command builders only echo
   echo "$(compose_cmd o11y "$dir/releases/$1" .env compose.yaml) up -d --remove-orphans"
@@ -736,6 +802,9 @@ deploy_plan() {
     attempt_cmd "$id"
     data_cmd
     echo "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init"
+    echo "op read \$O11Y_ALERT_DISCORD_WEBHOOK_REF | $(secret_cmd alert_discord_webhook_url "$webhook_re")    # the Discord webhook URL, on stdin"
+    [[ -z ${O11Y_ALERT_EMAIL_TO:-} ]] ||
+      echo "op read \$O11Y_ALERT_SMTP_PASSWORD_REF | $(secret_cmd alert_smtp_password "$smtp_password_re")    # the SMTP password, on stdin"
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
     echo "$docker exec -i <rustfs container> curl ...    # readiness of each service, then the receipt check"
@@ -755,12 +824,14 @@ deploy() {
     id=$(<tmp/deploy/staged)
   fi
   current=$(promoted current)
+  load_model "tmp/deploy/$id/release"
   # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(attempt_cmd "$id")" || die "$task: the attempt could not be recorded"
   # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   # shellcheck disable=SC2312 # the command builders only echo
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
+    send_secrets &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
     swap_pending="$id $current"
@@ -945,6 +1016,8 @@ mimir 0:0 750
 rustfs 10001:10001 750
 secrets 0:0 755
 tempo 10001:10001 750
+secrets/alert_discord_webhook_url 472:472 400 34
+secrets/alert_smtp_password 472:472 400 0
 secrets/grafana_admin_password 472:472 400 33
 secrets/rustfs.access_key 10001:10001 400 21
 secrets/rustfs.secret_key 10001:10001 400 41
@@ -1039,7 +1112,7 @@ gate_test() {
   layout=$(remote "$(util_cmd "$data" "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*")") &&
     [[ $layout == "$gate_layout" ]] ||
     die "$task: owners, modes or sizes under the gate data directory differ from the layout"
-  ok "$task: the data directories and the four secret files have the expected owners, modes and sizes"
+  ok "$task: the data directories and the six secret files have the expected owners, modes and sizes"
 
   # Read back from the object store, as smoke.sh does: Loki, with its
   # container removed and its local directory emptied, can only answer from
@@ -1184,7 +1257,7 @@ case $task in
 preflight) need host dir docker compose tailscale ports reserve ;;
 deploy-plan) need dir docker compose domain ports ;;
 stage) need host dir docker compose domain ports ;;
-deploy) need host dir docker compose domain ports reserve ;;
+deploy) need host dir docker compose domain ports reserve alert ;;
 gate-test) need host dir docker compose reserve ;;
 gate-clean | rollback | down | logs) need host dir docker compose ;;
 status) need host dir docker tailscale ;;

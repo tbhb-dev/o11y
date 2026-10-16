@@ -20,7 +20,7 @@ Check the staged diff against that list before every commit. `tools/check-leaks.
 
 `tools/check-leaks.sh` stops private values from reaching a commit, using two sets of rules over the same text.
 
-Private literals form the first set. It matches them in every file, ignoring case. The literals are the values of `O11Y_SSH_HOST`, `O11Y_REMOTE_DIR`, `O11Y_REMOTE_TAILSCALE`, `O11Y_TAILNET_DOMAIN` (and its first label) and `O11Y_NODE_ADDR`, plus each entry of the comma-separated `O11Y_PRIVATE_STRINGS`, the deploy host's own name, which stage and gate-test read over SSH into `tmp/deploy/host-name`, and `O11Y_CLUSTER` when it names something other than its default, `o11y`. A value under four characters matches too much. The script skips it and warns.
+Private literals form the first set. It matches them in every file, ignoring case. The literals are the values of `O11Y_SSH_HOST`, `O11Y_REMOTE_DIR`, `O11Y_REMOTE_TAILSCALE`, `O11Y_TAILNET_DOMAIN` (and its first label) and `O11Y_NODE_ADDR`, plus each entry of the comma-separated `O11Y_PRIVATE_STRINGS`, the deploy host's own name, which stage and gate-test read over SSH into `tmp/deploy/host-name`, `O11Y_CLUSTER` when it names something other than its default, `o11y`, the 1Password references in `O11Y_ALERT_DISCORD_WEBHOOK_REF` and `O11Y_ALERT_SMTP_PASSWORD_REF` and each one's item name, and the values of `O11Y_ALERT_EMAIL_TO`, `O11Y_ALERT_SMTP_USER` and `O11Y_ALERT_SMTP_FROM`. A value under four characters matches too much. The script skips it and warns.
 
 The second set matches shapes that identify a private network whatever the value, namely password manager references, tailnet host names other than `example.ts.net`, tailnet addresses, private IPv4 addresses, and path shapes from the network-attached storage host (a `/volume<N>` shared folder, and the services and packages trees under `/var`), whether the path is the root itself or something below it. The vendored and deployed trees (`.claude/`, `.agents/`, `.devtools/`, `.config/mise/conf.d/` and `.vale/`) and the checker's own two files skip this set but not the first.
 
@@ -36,7 +36,7 @@ The check guards against accidents in a cooperative workflow. It doesn't catch a
 
 ## Stack secrets
 
-The init one-shot generates the S3 key and the Grafana recovery password on the host that runs the stack. Keep both out of committed files, rendered files, command lines, logs, and task output.
+The init one-shot generates the S3 key and the Grafana recovery password on the host that runs the stack. The Discord webhook URL and the mail server password for alerts come from 1Password instead: `deploy` pipes each from `op read` to the host on standard input, into `data/secrets/`. Keep all four out of committed files, rendered files, command lines, logs, and task output.
 
 Compose prints the contents of every environment file a model loads. Against the environment file of a deployment, run `config` only with `-q`. To read a resolved model, run `mise run compose-config` instead. It renders with placeholders and loads a dummy file, and it ignores inherited variables. In a task, run `docker inspect` on the stack's containers only with a `-f` template that can't print `Config.Env`. Their environment contains the S3 key.
 

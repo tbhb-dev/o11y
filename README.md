@@ -27,6 +27,14 @@ A first deploy runs these tasks in order:
 7. `serve-apply` maps the two Tailscale Services to the stack's loopback ports.
 8. `smoke-remote` sends a trace, a log and a metric through the Services and reads each one back.
 
+### Alerts
+
+The stack's Grafana sends its own alerts to Discord, and also by email once you set a recipient. An alert goes out when a service stays down for 5 minutes, when disk free drops below the deploy reserve, when a backend or Alloy drops incoming data, when RustFS nears its memory limit, when one of Alloy's queues fills or an exporter gives up, and when the stack logs more than 50 lines a second to Loki for an hour. `config/grafana/provisioning/alerting/` holds the rules. `deploy` reads the webhook URL with `op read` from the 1Password reference in `O11Y_ALERT_DISCORD_WEBHOOK_REF`, which needs a signed-in 1Password command-line tool, and pipes the URL to the host. There it goes into `data/secrets/` beside the Grafana password. Until a deploy writes it, as on the gate, the contact point posts to a placeholder address that refuses every connection.
+
+With a recipient in `O11Y_ALERT_EMAIL_TO`, alerts also go out by email, and without one that receiver stays off. A recipient needs `O11Y_ALERT_SMTP_HOST`, `O11Y_ALERT_SMTP_PORT`, `O11Y_ALERT_SMTP_USER` and `O11Y_ALERT_SMTP_FROM` beside it, the Simple Mail Transfer Protocol (SMTP) server and login. `deploy` pipes the SMTP password from the reference in `O11Y_ALERT_SMTP_PASSWORD_REF` the same way as the webhook URL. Grafana requires STARTTLS on that connection.
+
+A `rollback` to a release from before alerting leaves the alerts in place, because Grafana keeps a provisioned rule or contact point after its file goes away.
+
 ### After the first deploy
 
 For day-to-day work, `status` shows the current release and each service's state, and `logs` shows recent container logs. To go back, `rollback` starts the current release again, or the one before it with `--previous`. Once `--previous` passes the health gate, the two pointers swap: `current` names the restored release and `previous` the one rolled back from. The next deploy then keeps the restored release as its fallback. Finally, `down` removes the containers and leaves everything else in place.

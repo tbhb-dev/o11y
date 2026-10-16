@@ -16,6 +16,17 @@
 # has no generated secrets. Rendered output never holds a credential. Each
 # directory carries a MANIFEST.sha256 for an upload to verify.
 #
+# Config files may carry @O11Y_DISK_RESERVE_GB@ and @O11Y_DISK_RESERVE_BYTES@,
+# which become the disk reserve deploy enforces (O11Y_DISK_RESERVE_GB, 50 GiB
+# when unset), and lines between two `# @O11Y_ALERT_EMAIL@` markers, which
+# are kept when O11Y_ALERT_EMAIL_TO is set and dropped when it isn't. The
+# directory name hashes the files after that, so a changed reserve or a
+# change to email renders a new one.
+#
+# Email needs O11Y_ALERT_SMTP_HOST, _PORT, _USER and _FROM as well, and
+# they go to the env file only then. O11Y_ALERT_SMTP_SKIP_VERIFY is for the
+# boot test's stub alone.
+#
 # Needs no Docker and no network. Never add `set -x`: the env file holds
 # deployment paths.
 set -euo pipefail
@@ -56,6 +67,41 @@ for name in "${required[@]}"; do
   fi
 done
 [[ $missing -eq 0 ]] || exit 1
+reserve_gb=${O11Y_DISK_RESERVE_GB:-50}
+# No leading zero, as nas.sh requires, so both read the same number.
+if [[ ! $reserve_gb =~ ^(0|[1-9][0-9]{0,5})$ ]]; then
+  echo "render: O11Y_DISK_RESERVE_GB must be a whole number of GiB, with no leading zero" >&2
+  exit 1
+fi
+reserve_bytes=$((reserve_gb * 1073741824))
+
+# Email is on only with a recipient, and then every SMTP setting must hold.
+# A message names the variable, never its value.
+email=()
+if [[ -n ${O11Y_ALERT_EMAIL_TO:-} ]]; then
+  # Plain characters only: the env file holds them unquoted.
+  address='^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+$'
+  label='[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?'
+  bad() {
+    echo "render: $1" >&2
+    missing=1
+  }
+  [[ $O11Y_ALERT_EMAIL_TO =~ $address ]] || bad "O11Y_ALERT_EMAIL_TO must be one email address"
+  [[ ${O11Y_ALERT_SMTP_HOST:-} =~ ^$label(\.$label)*$ ]] || bad "O11Y_ALERT_SMTP_HOST must be a host name, since O11Y_ALERT_EMAIL_TO is set"
+  if [[ ! ${O11Y_ALERT_SMTP_PORT:-} =~ ^[1-9][0-9]{0,4}$ ]] || ((O11Y_ALERT_SMTP_PORT > 65535)); then
+    bad "O11Y_ALERT_SMTP_PORT must be a port from 1 to 65535, since O11Y_ALERT_EMAIL_TO is set"
+  fi
+  [[ ${O11Y_ALERT_SMTP_USER:-} =~ ^[A-Za-z0-9._%+@-]+$ ]] ||
+    bad "O11Y_ALERT_SMTP_USER must be a login of letters, digits and ._%+@-, since O11Y_ALERT_EMAIL_TO is set"
+  [[ ${O11Y_ALERT_SMTP_FROM:-} =~ $address ]] || bad "O11Y_ALERT_SMTP_FROM must be one email address, since O11Y_ALERT_EMAIL_TO is set"
+  [[ ${O11Y_ALERT_SMTP_SKIP_VERIFY:-false} =~ ^(true|false)$ ]] || bad "O11Y_ALERT_SMTP_SKIP_VERIFY must be true or false"
+  [[ $missing -eq 0 ]] || exit 1
+  email=(O11Y_ALERT_EMAIL_TO O11Y_ALERT_SMTP_HOST O11Y_ALERT_SMTP_PORT O11Y_ALERT_SMTP_USER O11Y_ALERT_SMTP_FROM)
+  [[ -z ${O11Y_ALERT_SMTP_SKIP_VERIFY:-} ]] || email+=(O11Y_ALERT_SMTP_SKIP_VERIFY)
+  email_lines='/# @O11Y_ALERT_EMAIL@ /d'
+else
+  email_lines='/# @O11Y_ALERT_EMAIL@ begin/,/# @O11Y_ALERT_EMAIL@ end/d'
+fi
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 mkdir -p "$outdir/config"
@@ -87,12 +133,28 @@ printf 'AWS_ACCESS_KEY_ID=dummy-not-a-secret\nAWS_SECRET_ACCESS_KEY=dummy-not-a-
   for name in "${optional[@]}"; do
     [[ -z ${!name:-} ]] || printf '%s=%s\n' "$name" "${!name}"
   done
+  for name in ${email[@]+"${email[@]}"}; do
+    printf '%s=%s\n' "$name" "${!name}"
+  done
+  [[ ${#email[@]} -eq 0 ]] || echo O11Y_ALERT_SMTP_ENABLED=true
   for dir in "$root"/config/*/; do
     name=$(basename "$dir")
-    lines=$(manifest "$dir")
+    copy=$outdir/config/.incoming-$name
+    rm -rf "$copy"
+    cp -R "$dir" "$copy"
+    # grep exits 1 when no file has a token, 2 when it can't search.
+    files=$(grep -rlF '@O11Y_' "$copy") || [[ $? -eq 1 ]] || exit 1
+    for file in $files; do
+      sed -e "s/@O11Y_DISK_RESERVE_GB@/$reserve_gb/g" -e "s/@O11Y_DISK_RESERVE_BYTES@/$reserve_bytes/g" \
+        -e "$email_lines" "$file" >"$file.new"
+      mv "$file.new" "$file"
+    done
+    lines=$(manifest "$copy")
     target=$name-$(sha256 <<<"$lines" | cut -c1-12)
-    if [[ ! -d $outdir/config/$target ]]; then
-      cp -R "$dir" "$outdir/config/$target"
+    if [[ -d $outdir/config/$target ]]; then
+      rm -rf "$copy"
+    else
+      mv "$copy" "$outdir/config/$target"
       echo "$lines" >"$outdir/config/$target/MANIFEST.sha256"
       # Containers running as other users read these after a transfer.
       chmod -R u=rwX,go=rX "$outdir/config/$target"

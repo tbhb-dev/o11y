@@ -1,0 +1,37 @@
+---
+# Where the stack's alerts go. The Discord webhook URL is a secret: Grafana
+# reads it from the file deploy writes, and its API shows the URL to the
+# admin alone. Every alert routes to the one contact point, grouped by rule,
+# so an outage that trips several rules sends one message per rule.
+#
+# Email is the contact point's other receiver, and only when
+# O11Y_ALERT_EMAIL_TO is set: render.sh keeps the lines between the begin
+# and end markers below then, and drops them otherwise. The SMTP settings
+# are in Grafana's environment, and its password is read from a file deploy
+# writes, the same way as the webhook URL.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: o11y-stack
+    receivers:
+      # @O11Y_ALERT_EMAIL@ begin
+      - uid: o11y-email
+        type: email
+        settings:
+          addresses: $__env{O11Y_ALERT_EMAIL_TO}
+          singleEmail: true
+      # @O11Y_ALERT_EMAIL@ end
+      - uid: o11y-discord
+        type: discord
+        settings:
+          url: $__file{/run/o11y/alert_discord_webhook_url}
+          use_discord_username: false
+
+policies:
+  - orgId: 1
+    receiver: o11y-stack
+    group_by: [grafana_folder, alertname]
+    group_wait: 1m
+    group_interval: 10m
+    repeat_interval: 12h

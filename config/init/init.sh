@@ -80,6 +80,25 @@ generate_secret rustfs.access_key 'A-Z0-9' 20
 generate_secret rustfs.secret_key 'A-Za-z0-9' 40
 generate_secret grafana_admin_password 'A-Za-z0-9' 32
 
+# The Discord webhook URL and the SMTP password for alerts arrive from
+# deploy, never from here, and deploy replaces these files after init.
+# Grafana reads both at start, so a missing or empty webhook file gets a
+# placeholder whose address refuses every connection: notifications to it
+# fail, and nothing leaves the host. A missing password file is created
+# empty, which is what Grafana reads while email is off.
+webhook=$secrets/alert_discord_webhook_url
+smtp_password=$secrets/alert_smtp_password
+if [ ! -s "$webhook" ]; then
+  printf '%s' 'http://127.0.0.1:9/o11y-no-webhook' >"$secrets/.tmp.alert_discord_webhook_url"
+  mv "$secrets/.tmp.alert_discord_webhook_url" "$webhook"
+  echo "init: wrote a placeholder alert_discord_webhook_url"
+fi
+if [ ! -f "$smtp_password" ]; then
+  : >"$secrets/.tmp.alert_smtp_password"
+  mv "$secrets/.tmp.alert_smtp_password" "$smtp_password"
+  echo "init: wrote an empty alert_smtp_password"
+fi
+
 access_key=$(cat "$secrets/rustfs.access_key")
 secret_key=$(cat "$secrets/rustfs.secret_key")
 printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$access_key" "$secret_key" >"$secrets/.tmp.s3.env"
@@ -89,7 +108,7 @@ mv "$secrets/.tmp.s3.env" "$secrets/s3.env"
 
 chown 10001:10001 "$secrets/rustfs.access_key" "$secrets/rustfs.secret_key"
 chmod 0400 "$secrets/rustfs.access_key" "$secrets/rustfs.secret_key"
-chown 472:472 "$secrets/grafana_admin_password"
-chmod 0400 "$secrets/grafana_admin_password"
+chown 472:472 "$secrets/grafana_admin_password" "$webhook" "$smtp_password"
+chmod 0400 "$secrets/grafana_admin_password" "$webhook" "$smtp_password"
 
 echo "init: ok"
