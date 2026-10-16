@@ -15,6 +15,8 @@
 # backslashes, continued lines, $( ) and comments. It can't see a curl
 # behind a wrapper such as receipt.sh's http, or one inside a quoted string
 # that runs elsewhere, such as the remote commands tools/nas.sh builds.
+# Nor does it see a curl named by a variable or run through eval or sh -c,
+# and an allow comment still covers the next curl across blank lines.
 # cspell:ignore hdword hdstrip hdnext incurl gsub RSTART RLENGTH
 set -euo pipefail
 
