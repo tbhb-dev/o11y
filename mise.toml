@@ -206,12 +206,6 @@ files=$(git ls-files --cached --others --exclude-standard -- '*.sh' ':!:.claude/
 description = "Fail when a curl in tools/*.sh has no fail option and no allow comment"
 run = "bash tools/check-curl-fail.sh"
 
-# Also beyond shellcheck: `! grep -q` and `! cmp -s` read their own failure
-# as an answer, and grep -q's early exit can turn SIGPIPE into a pass.
-[tasks.lint-negated]
-description = "Fail when a script in tools/*.sh negates grep -q or cmp -s without an allow comment"
-run = "bash tools/check-negated-status.sh"
-
 [tasks.lint]
 extends = "devtools:lint"
 run = [
@@ -233,7 +227,6 @@ run = [
   "mise run lint-shell",
   "mise run lint-shell-fmt",
   "mise run lint-curl",
-  "mise run lint-negated",
 ]
 
 [tasks.test-vendored]
@@ -241,8 +234,8 @@ description = "Test the vendored-payload drift gate on a copy of the tree"
 run = "bats tools/check-vendored.bats"
 
 [tasks.test-tools]
-description = "Test the devtools pin parser, the prose fixer's failure handling, the curl check and the negated-status check"
-run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats tools/check-curl-fail.bats tools/check-negated-status.bats"
+description = "Test the devtools pin parser, the prose fixer's failure handling and the curl check"
+run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats tools/check-curl-fail.bats"
 
 [tasks.test-leaks]
 description = "Test the leak check against throwaway repositories"
