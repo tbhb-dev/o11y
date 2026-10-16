@@ -103,12 +103,50 @@ script() {
   done
 }
 
-@test "of four negations, only the negated cmp -s fails" {
+@test "a quiet grep at any pipeline stage fails, and a pattern after -- or a plain grep passes" {
   script '! grep -q a f | wc -l' '! cmp -s a b && true' '! grep -- -q f' 'grep -q a f || die'
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 1 ]
-  [ "$(grep -c 'a negated' <<<"$output")" -eq 1 ]
+  [ "$(grep -c 'a negated' <<<"$output")" -eq 2 ]
+  [[ $output == *"$dir/t.sh:2: a negated"* && $output == *"$dir/t.sh:3: a negated"* ]]
+}
+
+# Codex's third-round reproductions.
+
+@test "a quiet grep behind command, builtin, exec or env fails" {
+  local line
+  for line in '! command grep -q x missing' '! command -p grep -q x f' '! env LC_ALL=C grep -q x missing' \
+    '! env -i -u HOME LC_ALL=C grep -q x f' '! exec grep -q x f' '! builtin command cmp -s a b'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "a quiet cmp in a non-final pipeline stage fails" {
+  script 'set -o pipefail' '! cmp -s missing input | cat'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
   [[ $output == "$dir/t.sh:3: a negated"* ]]
+}
+
+@test "a -- that is the argument of -e doesn't end the options" {
+  local line
+  for line in '! grep -e -- -q missing' '! grep --regexp -- -q f' '! grep -ie -- -q f' '! grep -f -- -q f' '! cmp -i -- -s a b'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+  script '! grep -e x -- -q f'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "an allow comment covers only the first statement on the line below it" {
+  script '# lint-negated: allow the first one fails safe' '! grep -q a f; ! grep -q b f'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [ "$(grep -c 'a negated' <<<"$output")" -eq 1 ]
 }
 
 @test "a script shfmt can't parse fails" {
