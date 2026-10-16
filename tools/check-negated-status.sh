@@ -53,8 +53,8 @@ if [[ $# -eq 0 ]]; then
   set -- tools/*.sh
 fi
 
-# The line and column of every negated statement whose status can come
-# from a quiet grep or cmp, one "line col" pair per line.
+# The line of every negated statement whose status can come from a quiet
+# grep or cmp, once per statement, sorted.
 negations() {
   shfmt --to-json <"$1" | jq -r '
     # An unquoted literal with its backslash escapes removed, as the shell
@@ -132,7 +132,7 @@ negations() {
       else $c end;
     [.. | objects | select(.Negated == true and has("Position"))] |
       map(select(any(lasts; .Type == "CallExpr" and (.Args | length) > 0 and quiet)) | [.Position.Line, .Position.Col]) |
-      unique | .[] | "\(.[0]) \(.[1])"'
+      unique | .[] | .[0]'
 }
 
 failed=0
@@ -143,10 +143,12 @@ for file; do
     continue
   }
   [[ -n $lines ]] || continue
-  # An allow comment covers only the first flagged statement on its line;
-  # the list is sorted by line, then column.
+  # An allow comment covers only the first flagged statement on its line.
+  # The loop splits the list of numbers itself: Bash 3.2 writes a
+  # here-string to a temp file, and when it can't, it skips the loop and
+  # the check passes.
   allowed=
-  while read -r line _; do
+  for line in $lines; do
     if [[ $allowed != "$line" ]] && ((line > 1)) &&
       sed -n "$((line - 1))p" "$file" | grep -Eq '^[[:space:]]*# lint-negated: allow [^[:space:]]'; then
       allowed=$line
@@ -155,6 +157,6 @@ for file; do
     allowed=$line
     echo "$file:$line: a negated grep -q or cmp -s reads its own failure as an answer; use lacks or files_differ, or put # lint-negated: allow <reason> on the line before"
     failed=1
-  done <<<"$lines"
+  done
 done
 exit "$failed"

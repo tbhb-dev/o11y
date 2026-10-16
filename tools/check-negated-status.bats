@@ -263,3 +263,31 @@ script() {
     [ "$status" -eq 1 ]
   done
 }
+
+# Codex's third-round reproduction on #15: Bash 3.2 writes a here-string
+# to a temp file, and a failure to create it passed flagged input.
+
+@test "a flagged script still fails when TMPDIR is read-only" {
+  script '! grep -q x missing'
+  mkdir "$dir/ro"
+  chmod 555 "$dir/ro"
+  TMPDIR="$dir/ro" run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:2: a negated"* ]]
+}
+
+@test "a flagged script still fails under Bash 3.2 when no temp file can be written" {
+  if ! command -v sandbox-exec >/dev/null || [[ ! -x /bin/bash ]]; then
+    skip "needs the macOS sandbox-exec and /bin/bash"
+  fi
+  script '! grep -q x missing'
+  run sandbox-exec -p '(version 1)(allow default)(deny file-write* (require-not (subpath "/dev")))' \
+    /bin/bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:2: a negated"* ]]
+}
+
+@test "the check itself uses no here-string or here-document" {
+  run grep -n '<<' "$check"
+  [ "$status" -eq 1 ]
+}
