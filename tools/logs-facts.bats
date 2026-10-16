@@ -8,6 +8,7 @@
 # request. Every run asserts that no private value reached the output: the
 # test directory holds the data root, and every private value the stubs
 # print contains the word private.
+# cspell:ignore cachedev devtmpfs drrrrrrrrr drwxr drwxrwxrwx inodes nodev noexec nosuid rootfs rwxr subvol subvolid syno unbindable
 # cspell:ignore compgen drwx hostconfig logconfig mountinfo noprofile norc relatime rprivate statx submount tmpfs versinfo
 
 setup() {
@@ -174,7 +175,7 @@ cat "$STUB/netstat"
 STUB
   stub "$dir/bin/df" <<'STUB'
 [ -z "${STUB_DF_FAIL:-}" ] || exit 1
-echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "${STUB_DF_HEADER-Filesystem 1024-blocks Used Available Capacity Mounted on}"
 echo "${STUB_DF-/dev/md0 2385528 1700000 600000 75% /}"
 STUB
   export STUB=$dir STUB_READER_BASH=$real_bash
@@ -255,7 +256,7 @@ failed() {
   [[ $output == *"R3 tempo-globbed yes"* ]]
   [[ $output == *"R3 tempo-readable yes"* ]]
   [[ $output == *"R4 log-mode "* ]]
-  [[ $output == *"R4 acl-on-target no"* ]]
+  [[ $output == *"R4 posix-acl-on-target no"* ]]
   [[ $output == *"R5 o11y json-file 6"* ]]
   [[ $output == *"R5 o11y-gate json-file 1"* ]]
   [[ $output == *"R5 other json-file 1"* ]]
@@ -275,13 +276,18 @@ failed() {
   [ ! -e "$dir/sudo.log" ]
 }
 
-# each_bash <test body function>: runs it under this bash and, where there
-# is one, under macOS's bash 3.2.
+# each_bash <test body function>: runs it under every distinct bash version
+# the machine has, the one on PATH and /bin/bash. Where both are one shell,
+# as on a Mac without a newer bash, it runs once; CI's Ubuntu runs bash 5.
 each_bash() {
-  HOST_BASH=$real_bash "$1"
-  if [[ -x /bin/bash ]] && [[ $(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"') == 3 ]]; then
-    HOST_BASH=/bin/bash "$1"
-  fi
+  local shell version seen=' '
+  for shell in "$real_bash" /bin/bash; do
+    [[ -x $shell ]] || continue
+    version=$("$shell" -c 'echo "$BASH_VERSION"')
+    [[ $seen != *" $version "* ]] || continue
+    seen+="$version "
+    HOST_BASH=$shell "$1"
+  done
 }
 
 unbound_after_trap() {
@@ -292,7 +298,7 @@ unbound_after_trap() {
   sed -i '/^: "$no_such_variable"$/d' "$dir/logs-facts.sh"
 }
 
-@test "an unbound variable after the trap fails with FAIL run, on bash 3.2 too" {
+@test "an unbound variable after the trap fails with FAIL run, under each bash on the machine" {
   each_bash unbound_after_trap
 }
 
@@ -320,7 +326,7 @@ terminated() {
   failed "FAIL run: the run was stopped by a signal"
 }
 
-@test "SIGTERM during the run fails with FAIL run, on bash 3.2 too" {
+@test "SIGTERM during the run fails with FAIL run, under each bash on the machine" {
   each_bash terminated
 }
 
@@ -462,17 +468,86 @@ terminated() {
   failed "FAIL R4: ls printed an unexpected mode word"
 }
 
-@test "an ACL mark on the target reads as yes" {
+@test "a POSIX ACL mark on the target reads as yes, and the mode agrees with stat" {
+  chmod 710 "$data/containers"
   stub "$dir/bin/ls" <<<'echo "drwx--x---+ 3 root root 4096 Oct 16 00:00 x"'
   facts
   [ "$status" -eq 0 ]
-  [[ $output == *"R4 acl-on-target yes"* ]]
+  [[ $output == *"R4 target-mode 710"* ]]
+  [[ $output == *"R4 posix-acl-on-target yes"* ]]
+}
+
+@test "GNU, SELinux and BusyBox mode words pass, special bits included" {
+  chmod 2750 "$data/containers"
+  for word in drwxr-s--- drwxr-s---. drwxr-s---@; do
+    stub "$dir/bin/ls" <<<"echo '$word 3 root root 4096 Oct 16 00:00 x'"
+    facts
+    [ "$status" -eq 0 ]
+    [[ $output == *"R4 posix-acl-on-target no"* ]]
+  done
+}
+
+@test "a mode word outside the grammar stops at R4 (Codex PR 16 r2)" {
+  for word in drrrrrrrrr -rwxr-xr-x drwxr-xr-x+x drwxr-xr-X; do
+    stub "$dir/bin/ls" <<<"echo '$word 3 root root 4096 Oct 16 00:00 x'"
+    facts
+    failed "FAIL R4: ls printed an unexpected mode word"
+  done
+}
+
+@test "a mode word that disagrees with stat stops at R4" {
+  stub "$dir/bin/ls" <<<'echo "drwxrwxrwx 3 root root 4096 Oct 16 00:00 x"'
+  facts
+  failed "FAIL R4: ls and stat disagree on the target's mode"
 }
 
 @test "a malformed mount table line stops at R1" {
   echo "private" >>"$dir/host-mountinfo"
   facts
   failed "FAIL R1: the mount table could not be read, or holds no enclosing mount"
+}
+
+@test "a mount table line outside the mountinfo grammar stops at R1 (Codex PR 16 r2)" {
+  cp "$dir/host-mountinfo" "$dir/host-mountinfo.good"
+  for line in "x 22 0:31 / /private rw - tmpfs tmpfs rw" "31 y 0:31 / /private rw - tmpfs tmpfs rw" \
+    "31 22 private / /private rw - tmpfs tmpfs rw" "31 22 0:31 private /private rw - tmpfs tmpfs rw" \
+    "31 22 0:31 / private rw - tmpfs tmpfs rw" "31 22 0:31 / /private private - tmpfs tmpfs rw" \
+    "31 22 0:31 / /private rw private:1 - tmpfs tmpfs rw" "31 22 0:31 / /private rw - tmpfs" \
+    "31 22 0:31 / /private rw - tmpfs tmpfs rw private"; do
+    cp "$dir/host-mountinfo.good" "$dir/host-mountinfo"
+    echo "$line" >>"$dir/host-mountinfo"
+    facts
+    failed "FAIL R1: the mount table could not be read, or holds no enclosing mount"
+  done
+}
+
+@test "a real kernel mount table with propagation tags passes" {
+  cat >"$dir/host-mountinfo" <<EOF
+1 1 0:1 / / rw - rootfs rootfs rw,size=1012345k
+22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/md0 rw,data=ordered
+23 22 0:5 / /dev rw,nosuid,relatime shared:2 - devtmpfs devtmpfs rw,size=1012345k,nr_inodes=253086,mode=755
+24 22 0:22 / /proc rw,nosuid,nodev,noexec,relatime shared:5 - proc proc rw
+30 22 0:30 / $dir rw,relatime shared:12 master:3 - btrfs /dev/mapper/cachedev_0 rw,space_cache=v2,subvolid=256,subvol=/@syno
+31 30 0:30 /@docker/private /srv/private\040dir rw,relatime unbindable - btrfs /dev/mapper/cachedev_0 rw
+EOF
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"R1 propagation shared:12 master:3"* ]]
+}
+
+@test "of mounts stacked on /, the last one, in view, is the one reported" {
+  printf '1 1 0:1 / / rw - rootfs rootfs rw\n22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/md0 rw\n' >"$dir/host-mountinfo"
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"R1 enclosing-mount ancestor"* ]]
+  [[ $output == *"R1 type ext4"* ]]
+  [[ $output == *"R1 propagation shared:1"* ]]
+}
+
+@test "a reader mount table line outside the grammar stops at R2" {
+  echo "51 50 0:51 private /elsewhere rw - tmpfs tmpfs rw" >>"$dir/reader-mountinfo"
+  facts
+  failed "FAIL R2: the reader could not read its own mount table"
 }
 
 @test "a failed stat on config.v2.json inside the reader stops at R4" {
@@ -591,13 +666,13 @@ terminated() {
 @test "a port with a leading zero stops at A5 rather than reaching arithmetic" {
   echo "tcp 0 0 0.0.0.0:08 0.0.0.0:* LISTEN" >>"$dir/netstat"
   facts
-  failed "FAIL A5: a port has an unexpected shape"
+  failed "FAIL A5: the listener table has an unexpected shape"
 }
 
 @test "a port above 65535 stops at A5" {
   echo "tcp 0 0 0.0.0.0:65536 0.0.0.0:* LISTEN" >>"$dir/netstat"
   facts
-  failed "FAIL A5: a port has an unexpected shape"
+  failed "FAIL A5: the listener table has an unexpected shape"
 }
 
 @test "netstat output without its header stops at A5 rather than reading as no listeners" {
@@ -615,6 +690,93 @@ terminated() {
   failed "FAIL A5: the listener table has an unexpected shape"
 }
 
+# listeners <tool> <line>...: the given listener table, from netstat, or
+# from ss with netstat gone.
+listeners() {
+  local tool=$1
+  shift
+  printf '%s\n' "$@" >"$dir/netstat"
+  if [[ $tool == ss ]]; then
+    rm -f "$dir/bin/netstat"
+    stub "$dir/bin/ss" <<<"cat '$dir/netstat'"
+  fi
+}
+
+@test "real GNU, BusyBox and DSM-shaped netstat and ss tables pass" {
+  listeners netstat "Active Internet connections (only servers)" \
+    "Proto Recv-Q Send-Q Local Address           Foreign Address         State      " \
+    "tcp        0      0 0.0.0.0:22              0.0.0.0:*               LISTEN     " \
+    "tcp        0      0 127.0.0.1:3000          0.0.0.0:*               LISTEN     " \
+    "tcp6       0      0 :::5000                 :::*                    LISTEN     " \
+    "tcp6       0      0 ::1:631                 :::*                    LISTEN     " \
+    "tcp6       0      0 fe80::1%eth0:9100       :::*                    LISTEN     " \
+    "tcp6       0      0 ::ffff:127.0.0.1:8080   :::*                    LISTEN     "
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"A5 tcp-ports-on-all-addresses 22 5000"* ]]
+  # BusyBox lists IPv6 sockets under tcp and keeps the header's spacing.
+  listeners netstat "Active Internet connections (only servers)" \
+    "Proto Recv-Q Send-Q Local Address           Foreign Address         State       " \
+    "tcp        0      0 :::22                   :::*                    LISTEN      " \
+    "tcp        0      0 192.0.2.10:443          0.0.0.0:*               LISTEN      "
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"A5 tcp-ports-on-all-addresses 22"* ]]
+  listeners ss "State  Recv-Q Send-Q Local Address:Port  Peer Address:Port Process" \
+    "LISTEN 0      128          0.0.0.0:22         0.0.0.0:*" \
+    "LISTEN 0      4096       127.0.0.1:3000       0.0.0.0:*    users:((\"private\",pid=1,fd=3))" \
+    "LISTEN 0      128             [::]:22            [::]:*" \
+    "LISTEN 0      128                *:8080             *:*" \
+    "LISTEN 0      128   [::ffff:127.0.0.1]:9000       *:*" \
+    "LISTEN 0      128  [fe80::1%eth0]:9100          [::]:*"
+  facts
+  [[ $output == *"A5 tcp-ports-on-all-addresses 22 8080"* ]]
+}
+
+@test "an older ss header without Process passes" {
+  listeners ss "State      Recv-Q Send-Q        Local Address:Port          Peer Address:Port" \
+    "LISTEN     0      128                   *:22                       *:*"
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"A5 tcp-ports-on-all-addresses 22"* ]]
+}
+
+@test "a truncated listener header stops at A5 (Codex PR 16 r2)" {
+  listeners netstat "Proto Recv-Q Send-Q" "tcp 0 0 0.0.0.0:22 0.0.0.0:* LISTEN"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+  listeners ss "State Recv-Q Send-Q" "LISTEN 0 128 0.0.0.0:22 0.0.0.0:*"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+}
+
+@test "garbage queues or an address that is not one stop at A5 (Codex PR 16 r2)" {
+  local header="Proto Recv-Q Send-Q Local Address Foreign Address State"
+  for row in "tcp x y 0.0.0.0:22 0.0.0.0:* LISTEN" "tcp 0 0 not-an-address:12345 0.0.0.0:* LISTEN" \
+    "tcp 0 0 0.0.0.0:22 private LISTEN" "tcp 0 0 300.1.1.1:22 0.0.0.0:* LISTEN" "tcp 0 0 0.0.0.0:22 0.0.0.0:22x LISTEN" \
+    "tcp 0 0 [::1:22 :::* LISTEN" "tcp 0 0 0.0.0.0:* 0.0.0.0:* LISTEN" "tcp 01 0 0.0.0.0:22 0.0.0.0:* LISTEN" \
+    "tcp 0 0 a:b:22 0.0.0.0:* LISTEN" "tcp 0 0 [:::]:22 0.0.0.0:* LISTEN" "tcp 0 0 1::2::3:22 0.0.0.0:* LISTEN" \
+    "tcp 0 0 12345::1:22 0.0.0.0:* LISTEN" "tcp 0 0 1:2:3:4:5:6:7:8:9:22 0.0.0.0:* LISTEN"; do
+    listeners netstat "$header" "$row"
+    facts
+    failed "FAIL A5: the listener table has an unexpected shape"
+  done
+}
+
+@test "full and compressed IPv6 listeners pass" {
+  listeners netstat "Proto Recv-Q Send-Q Local Address Foreign Address State" \
+    "tcp6 0 0 2001:db8:0:0:0:0:0:1:22 :::* LISTEN" "tcp6 0 0 2001:db8::1:443 :::* LISTEN" "tcp6 0 0 ::1:631 :::* LISTEN"
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"A5 tcp-ports-on-all-addresses none"* ]]
+}
+
+@test "a well-formed table with no listener stops at A5" {
+  listeners netstat "Active Internet connections (only servers)" "Proto Recv-Q Send-Q Local Address Foreign Address State"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+}
+
 @test "no listener on all addresses prints none" {
   printf 'Proto Recv-Q Send-Q Local Address Foreign Address State\ntcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN\n' >"$dir/netstat"
   facts
@@ -624,9 +786,29 @@ terminated() {
 
 # --- N7 --------------------------------------------------------------------
 
+@test "GNU and BusyBox df -Pk output passes" {
+  STUB_DF_HEADER="Filesystem     1024-blocks    Used Available Capacity Mounted on" STUB_DF="/dev/md0         2385528 1700000    600000      75% /" facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"N7 root-free-kib 600000"* ]]
+  STUB_DF_HEADER="Filesystem           1024-blocks    Used Available Capacity Mounted on" STUB_DF="/dev/md0               2385528   1700000    600000  74% /" facts
+  [ "$status" -eq 0 ]
+}
+
+@test "df output outside the POSIX grammar stops at N7 (Codex PR 16 r2)" {
+  STUB_DF_HEADER="Filesystem" STUB_DF="/dev/fake 99999999 garbage 99999999 garbage /not-root" facts
+  failed "FAIL N7: the df output could not be read"
+  for row in "/dev/fake 99999999 garbage 99999999 75% /" "/dev/md0 2385528 1700000 600000 garbage /" \
+    "/dev/md0 2385528 1700000 600000 75% /private" "/dev/md0 600000 1700000 2385528 75% /" "/dev/md0 2385528 1700000 600000 75%"; do
+    STUB_DF="$row" facts
+    failed "FAIL N7: the df output could not be read"
+  done
+  STUB_DF_HEADER="Filesystem 1K-blocks Used Available Use% Mounted on" facts
+  failed "FAIL N7: the df output could not be read"
+}
+
 @test "a non-numeric df stops at N7" {
   STUB_DF="/dev/md0 2385528 1700000 private 75% /" facts
-  failed "FAIL N7: root-free-kib has an unexpected shape"
+  failed "FAIL N7: the df output could not be read"
 }
 
 @test "a failed df stops at N7" {

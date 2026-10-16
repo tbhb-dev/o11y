@@ -33,6 +33,13 @@
 #   From the first line on, the script's stderr goes to /dev/null, so no
 #   helper's diagnostic prints, bash's own included. The data root and
 #   other apps' project names never reach a print statement.
+# - It reads absence only from well-formed input. Each table it parses,
+#   the mount tables, the ls mode word, df -Pk and the listener table, has
+#   a closed grammar: a fixed header, an exact field count and a pattern
+#   for every field, and any line outside it fails the check. The grammar
+#   accepts what the kernel, GNU, BusyBox and DSM print. Malformation those
+#   never produce is covered only as far as the grammar reaches, and
+#   nothing further is promised.
 #
 # docker inspect only ever takes a -f template, and no template names
 # Config.Env. The host side keeps to bash 3.2: no associative arrays and no
@@ -40,6 +47,7 @@
 # temporary file; values reach a command through printf and a pipe or a
 # process substitution instead. The readers run in the Alloy image's bash,
 # started through env -i with a fixed PATH and no startup files.
+# cspell:ignore rstart synoacl tolower
 # cspell:ignore aufs devicemapper gelf hostconfig logdrv mountinfo noprofile norc overlayfs rootfs rprivate rwro rwxs tmpfs trunc unbindable
 set -euo pipefail
 exec 3>&2 2>/dev/null
@@ -131,9 +139,16 @@ reader() {
 
 # R2: the number of mounts at or below the target, and whether the target
 # itself is read-only.
+# Every line must match the mountinfo grammar R1 checks on the host.
 reader_r2() {
   local m
-  m=$(awk -v t="$target" '$5 == t || index($5, t "/") == 1 { n++; if ($5 == t) o = "," $6 "," }
+  m=$(awk -v t="$target" '
+    { if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+:[0-9]+$/ || $4 !~ /^\// || $5 !~ /^\// || $6 !~ /^(rw|ro)(,|$)/) exit 3
+      dash = 0
+      for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
+      if (dash == 0 || dash + 3 != NF) exit 3
+      for (i = 7; i < dash; i++) if ($i !~ /^((shared|master|propagate_from):[0-9]+|unbindable)$/) exit 3 }
+    $5 == t || index($5, t "/") == 1 { n++; if ($5 == t) o = "," $6 "," }
     END { print n + 0, (o ~ /,ro,/ ? "ro" : "not-ro") }' /proc/self/mountinfo) || exit 1
   echo "$m"
 }
@@ -213,14 +228,22 @@ echo "A2 image present"
 
 # --- R1: the mount that holds the data root; nothing below containers/ ------
 
+# The mountinfo grammar, here and in reader_r2: decimal mount and parent
+# ids, major:minor, a root and a mount point that start with /, options
+# that start with rw or ro, only propagation tags before the lone -, and
+# exactly a type, source and super options after it.
 r1=$(awk -v r="$root" -v c="$root/containers" '
-  # A mountinfo line has at least ten fields with a lone - among them.
-  { dash = 0; for (i = 7; i <= NF; i++) if ($i == "-") dash = i
-    if (NF < 10 || dash == 0 || dash + 3 > NF) exit 3
+  { if ($1 !~ /^[0-9]+$/ || $2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+:[0-9]+$/ || $4 !~ /^\// || $5 !~ /^\// || $6 !~ /^(rw|ro)(,|$)/) exit 3
+    dash = 0
+    for (i = 7; i <= NF; i++) if ($i == "-") { dash = i; break }
+    if (dash == 0 || dash + 3 != NF) exit 3
+    for (i = 7; i < dash; i++) if ($i !~ /^((shared|master|propagate_from):[0-9]+|unbindable)$/) exit 3
     mp = $5 }
   mp == c || index(mp, c "/") == 1 { below++ }
+  # >= so that of several mounts stacked on one mount point, the last,
+  # which is the one in view, wins.
   mp == "/" || mp == r || index(r, mp "/") == 1 {
-    if (length(mp) > best) {
+    if (length(mp) >= best) {
       best = length(mp); split($6, o, ","); rw = o[1]; tags = ""
       for (i = 7; i <= NF && $i != "-"; i++) tags = tags (tags == "" ? "" : " ") $i
       fstype = $(i + 1); kind = (mp == r) ? "itself" : "ancestor"
@@ -289,23 +312,48 @@ r4=$(printf '%s\n' "$id" | reader reader_r4) || fail R4 "the reader failed"
 labels=(target container-dir log config.v2.json hostconfig.json)
 i=0
 acl=
+target_mode=
+word=
+words=0
 while read -r a b extra; do
   [[ -z $extra ]] || fail R4 "the reader printed an unexpected line"
   if [[ $a == acl ]]; then
-    [[ -z $acl ]] || fail R4 "the reader printed an unexpected line"
-    # The mode word ls prints, with + for an ACL; anything else is no
-    # answer, so an empty or odd line fails rather than reading as none.
-    [[ $b =~ ^d[-rwxsStT]{9}[.+@]?$ ]] || fail R4 "ls printed an unexpected mode word"
-    if [[ $b == *+ ]]; then acl=yes; else acl=no; fi
-    show R4 acl-on-target "$YESNO" "$acl"
+    word=$b
+    words=$((words + 1))
     continue
   fi
   [[ $i -lt 5 ]] || fail R4 "the reader printed more than expected"
   show R4 "${labels[$i]}-mode" "$MODE" "$a"
   show R4 "${labels[$i]}-owner" "$OWNER" "$b"
+  if [[ $i == 0 ]]; then target_mode=$a; fi
   i=$((i + 1))
 done < <(printf '%s\n' "$r4")
-[[ $i == 5 && -n $acl ]] || fail R4 "the reader did not report all five paths and the ACL mark"
+[[ $i == 5 && $words == 1 ]] || fail R4 "the reader did not report all five paths and the mode word"
+# The mode word ls prints for the target: a directory, each position its
+# own letter or -, then . for an SELinux context, + for a POSIX ACL or @
+# for extended attributes. It must agree with stat's mode for the same
+# path, so an empty or odd answer fails rather than reading as no ACL.
+# DSM's own ACLs, synoacl, never show as + in ls, so this fact covers
+# POSIX ACLs only.
+[[ $word =~ ^d[-r][-w][-xsS][-r][-w][-xsS][-r][-w][-xtT][.+@]?$ ]] || fail R4 "ls printed an unexpected mode word"
+bits=0
+special=0
+for ((k = 1; k <= 9; k++)); do
+  c=${word:k:1}
+  bits=$((bits * 2))
+  case $c in
+  r | w | x | s | t) bits=$((bits + 1)) ;;
+  esac
+  case $k:$c in
+  3:s | 3:S) special=$((special + 4)) ;;
+  6:s | 6:S) special=$((special + 2)) ;;
+  9:t | 9:T) special=$((special + 1)) ;;
+  esac
+done
+printf -v from_ls '%o' $((special * 512 + bits))
+[[ $from_ls == "$target_mode" ]] || fail R4 "ls and stat disagree on the target's mode"
+if [[ $word == *+ ]]; then acl=yes; else acl=no; fi
+show R4 posix-acl-on-target "$YESNO" "$acl"
 
 # --- R5: every container on the host by project class and log driver --------
 # Other apps' projects count only as other, a driver outside the known set
@@ -391,17 +439,74 @@ elif command -v ss >/dev/null; then
 else
   fail A5 "neither netstat nor ss is on the host"
 fi
-# The tool's header first, then only listening TCP lines with a port, so
-# output in any other shape fails instead of reading as no listeners.
+# The listener table's grammar. netstat: an optional "Active Internet
+# connections" line, then exactly its header, then rows of tcp or tcp6,
+# two decimal queues, a local and a foreign address and LISTEN. ss:
+# exactly its header, with or without Process, then rows of LISTEN, two
+# decimal queues, a local and a peer address, and the process column when
+# the header has one. An address is a wildcard (*, 0.0.0.0, ::, [::]), an
+# IPv4 address, or an IPv6 one, bare or bracketed, with an optional
+# %interface and the ::ffff: mapped form; then a port from 1 to 65535, or *
+# on the remote side. Any other line fails, and so does a table with no
+# listener at all, since sshd listens on the host this ran over.
 found=$(printf '%s\n' "$l" | awk -v tool="$tool" '
-  tool == "netstat" && NR == 1 && /^Active Internet connections/ { next }
-  !seen && $1 == (tool == "netstat" ? "Proto" : "State") && $2 == "Recv-Q" && $3 == "Send-Q" { seen = 1; next }
-  !seen { exit 3 }
-  tool == "netstat" { if (NF != 6 || $1 !~ /^tcp6?$/ || $6 != "LISTEN") exit 3 }
-  tool == "ss" { if (NF < 5 || $1 != "LISTEN") exit 3 }
-  { a = $4; if (a !~ /:[0-9]+$/) exit 3 }
-  a ~ /^(0\.0\.0\.0|\*|\[::\]|::|):[0-9]+$/ || a ~ /^:::[0-9]+$/ { sub(/.*:/, "", a); print a }
-  END { if (!seen) exit 3 }') ||
+  function v4(h,   n, o, k) {
+    if (h !~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) return 0
+    n = split(h, o, ".")
+    for (k = 1; k <= n; k++) if (o[k] !~ /^(0|[1-9][0-9]?[0-9]?)$/ || o[k] + 0 > 255) return 0
+    return 1
+  }
+  # hex16 <text>: the number of colon-separated groups of one to
+  # four hex digits in the text, or -1 when one is not such a group.
+  function hex16(t,   n, g, k) {
+    if (t == "") return 0
+    n = split(t, g, ":")
+    for (k = 1; k <= n; k++) if (g[k] !~ /^[0-9A-Fa-f]+$/ || length(g[k]) > 4) return -1
+    return n
+  }
+  # v6: eight groups, or at most seven around one ::, after an optional
+  # %interface; or the ::ffff: form of an IPv4 address.
+  function v6(h,   d, l, r) {
+    sub(/%[A-Za-z0-9_.-]+$/, "", h)
+    if (tolower(h) ~ /^::ffff:/ && v4(substr(h, 8))) return 1
+    if (h !~ /^[0-9A-Fa-f:]+$/) return 0
+    d = index(h, "::")
+    if (!d) return hex16(h) == 8
+    if (index(substr(h, d + 2), "::")) return 0
+    l = hex16(substr(h, 1, d - 1))
+    r = hex16(substr(h, d + 2))
+    return l >= 0 && r >= 0 && l + r <= 7
+  }
+  # addr <token> <remote>: 1 when the token is an address and port; sets
+  # host to the address part.
+  function addr(a, remote,   port) {
+    if (!match(a, /:[^:]*$/)) return 0
+    host = substr(a, 1, RSTART - 1)
+    port = substr(a, RSTART + 1)
+    if (!(remote && port == "*") && (port !~ /^[1-9][0-9]*$/ || length(port) > 5 || port + 0 > 65535)) return 0
+    if (host == "*" || v4(host)) return 1
+    if (host ~ /^\[.*\]$/) return v6(substr(host, 2, length(host) - 2))
+    return v6(host)
+  }
+  !seen && tool == "netstat" && NR == 1 && $0 ~ /^Active Internet connections( |$)/ { next }
+  !seen && tool == "netstat" {
+    if ($0 !~ /^Proto +Recv-Q +Send-Q +Local +Address +Foreign +Address +State *$/) exit 3
+    seen = 1; next
+  }
+  !seen && tool == "ss" {
+    if ($0 ~ /^State +Recv-Q +Send-Q +Local +Address:Port +Peer +Address:Port *$/) process = 0
+    else if ($0 ~ /^State +Recv-Q +Send-Q +Local +Address:Port +Peer +Address:Port +Process *$/) process = 1
+    else exit 3
+    seen = 1; next
+  }
+  tool == "netstat" && (NF != 6 || $1 !~ /^tcp6?$/ || $6 != "LISTEN") { exit 3 }
+  tool == "ss" && ($1 != "LISTEN" || !(NF == 5 || (process && NF == 6))) { exit 3 }
+  $2 !~ /^(0|[1-9][0-9]*)$/ || $3 !~ /^(0|[1-9][0-9]*)$/ { exit 3 }
+  !addr($5, 1) { exit 3 }
+  !addr($4, 0) { exit 3 }
+  { rows++ }
+  host == "*" || host == "0.0.0.0" || host == "::" || host == "[::]" { a = $4; sub(/.*:/, "", a); print a }
+  END { if (!seen || rows == 0) exit 3 }') ||
   fail A5 "the listener table has an unexpected shape"
 ports=
 if [[ -n $found ]]; then
@@ -418,9 +523,17 @@ echo "A5 tcp-ports-on-all-addresses${shown:- none}"
 # --- N7: root filesystem headroom ------------------------------------------
 
 df=$(df -Pk /) || fail N7 "df failed"
-# The POSIX header, then exactly one line of six fields.
-sizes=$(printf '%s\n' "$df" | awk 'NR == 1 && $1 != "Filesystem" { exit 3 }
-  NR == 2 { if (NF != 6) exit 3; print $4, $2 }
+# The POSIX df -Pk grammar: exactly its header, then exactly one row of
+# six fields: a source, three decimal sizes, a percentage and /, with the
+# available size no larger than the total.
+sizes=$(printf '%s\n' "$df" | awk '
+  NR == 1 { if ($0 !~ /^Filesystem +1024-blocks +Used +Available +Capacity +Mounted +on *$/) exit 3; next }
+  NR == 2 {
+    if (NF != 6 || $2 !~ /^(0|[1-9][0-9]*)$/ || $3 !~ /^(0|[1-9][0-9]*)$/ || $4 !~ /^(0|[1-9][0-9]*)$/) exit 3
+    if ($5 !~ /^[0-9]+%$/ || $6 != "/" || $4 + 0 > $2 + 0) exit 3
+    print $4, $2; next
+  }
+  { exit 3 }
   END { if (NR != 2) exit 3 }') || fail N7 "the df output could not be read"
 read -r free total extra < <(printf '%s\n' "$sizes") || fail N7 "the df output has an unexpected shape"
 [[ -z $extra ]] || fail N7 "the df output has an unexpected shape"
