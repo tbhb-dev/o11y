@@ -492,8 +492,14 @@ delta_after_restart() {
   seen_delta=$(mimir_value o11y_smoke_delta_total) || return 1
   [[ $seen_delta == 2 ]]
 }
+# Alloy's readiness doesn't cover its OTLP receiver, which may still be
+# starting, so the measured point waits until an empty request is accepted.
+otlp_listening() {
+  expect_status 200 -H 'Content-Type: application/json' --data-binary '{}' "$O11Y_CHECK_OTLP_URL/v1/metrics" 2>/dev/null
+}
 main restart alloy >/dev/null 2>&1 || die "11: alloy did not restart"
 wait_ready alloy
+poll 60 otlp_listening || die "11: Alloy's OTLP receiver did not accept a request after its restart"
 now=$(date +%s)
 send_point o11y_smoke_delta 1 2 "$((now - 5))" "$now" || die "11: Alloy refused the delta point after its restart"
 poll 60 delta_after_restart || die "11: after a restart Mimir holds delta $seen_delta, not 2"
