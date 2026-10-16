@@ -43,6 +43,7 @@ if [[ ${1:-} == --model ]]; then
   exit 0
 fi
 
+local_engine_only
 pin_docker_api
 
 for file in compose.yaml compose.init.yaml compose.tools.yaml; do

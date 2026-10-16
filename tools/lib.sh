@@ -37,6 +37,36 @@ host_is_linux() {
   [[ $(uname -s) == Linux ]]
 }
 
+# local_engine_only: the local test tasks drive this machine's own engine,
+# Docker Desktop's VM on macOS or the local daemon on Linux, and nothing
+# else. An inherited DOCKER_HOST or DOCKER_CONTEXT could point the CLI and
+# Compose at another engine, such as the deploy host's, so both are
+# dropped. The CLI's current context must then be default or desktop-linux
+# on a local socket, and the engine must name itself as this machine's.
+# Anything else stops the task before it sends the engine any work.
+# Messages never print the context or engine name, which can be private.
+local_engine_only() {
+  local context endpoint info name os here
+  unset DOCKER_HOST DOCKER_CONTEXT
+  context=$(docker context show) || die "local engine: the Docker context could not be read"
+  case $context in
+  default | desktop-linux) ;;
+  *) die "local engine: the current Docker context is neither default nor desktop-linux, so this task refuses to run" ;;
+  esac
+  endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$context") ||
+    die "local engine: the Docker context could not be inspected"
+  [[ $endpoint == unix://* ]] || die "local engine: the Docker context does not use a local socket"
+  info=$(docker info --format '{{.Name}}|{{.OperatingSystem}}') || die "local engine: the engine did not answer"
+  name=${info%%|*}
+  os=${info#*|}
+  if host_is_linux; then
+    here=$(uname -n) || die "local engine: this machine's name could not be read"
+    [[ $name == "$here" ]] || die "local engine: the engine is not this machine's own"
+  else
+    [[ $name == docker-desktop && $os == "Docker Desktop" ]] || die "local engine: the engine is not this machine's Docker Desktop"
+  fi
+}
+
 # test_data_dir <name>: prints the data directory of a local test project.
 # On Linux it sits under tmp/. Docker Desktop shares host directories with
 # its Linux VM through a FUSE filesystem, which RustFS's startup guard

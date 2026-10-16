@@ -120,7 +120,9 @@ need() {
       [[ ${O11Y_TAILNET_DOMAIN:-} =~ ^$label(\.$label)+$ ]] || die "$task: O11Y_TAILNET_DOMAIN must be a DNS name"
       ;;
     reserve)
-      [[ $reserve_gb =~ ^[0-9]{1,6}$ ]] || die "$task: O11Y_DISK_RESERVE_GB must be a whole number of GiB"
+      # No leading zero: bash arithmetic would read 08 as an invalid octal
+      # number and let the gate pass.
+      [[ $reserve_gb =~ ^(0|[1-9][0-9]{0,5})$ ]] || die "$task: O11Y_DISK_RESERVE_GB must be a whole number of GiB, with no leading zero"
       ;;
     ports)
       need_port O11Y_GRAFANA_PORT "$grafana_port"
@@ -635,7 +637,7 @@ disk_gate() {
   local summary
   disk_space || die "$task: the host could not be asked for its free space under O11Y_REMOTE_DIR"
   summary=$(disk_summary)
-  if ((free_kb < reserve_gb * 1048576 || free_kb * 10 < total_kb)); then
+  if ((free_kb < 10#$reserve_gb * 1048576 || free_kb * 10 < total_kb)); then
     die "$task: the filesystem under O11Y_REMOTE_DIR has $summary, below the reserve of $reserve_gb GiB and 10 percent. Nothing was started"
   fi
   ok "$task: the filesystem under O11Y_REMOTE_DIR has $summary, above the reserve of $reserve_gb GiB and 10 percent"

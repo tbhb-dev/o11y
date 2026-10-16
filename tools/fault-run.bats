@@ -69,3 +69,36 @@ six() {
   run bash "$script" --check-load 1 "running 0"
   [ "$status" -ne 0 ]
 }
+
+# samples <count>: that many good samples of each of the six services.
+samples() {
+  local i service
+  for ((i = 0; i < $1; i++)); do
+    for service in alloy grafana loki mimir rustfs tempo; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' $((1760000000 + i * 5)) "$service" 1000 2000 900 100 0 0
+    done
+  done
+}
+
+@test "a complete sampler record passes" {
+  samples 10 >"$peaks"
+  run bash "$script" --check-samples "$peaks"
+  [ "$status" -eq 0 ]
+}
+
+@test "a sampler error, a shell message, a non-numeric or empty field, or too few samples fails" {
+  local bad
+  for bad in "ERROR	anon	a cgroup memory file could not be read" "cat: can't open memory.stat" \
+    "1760000000	alloy	1000	2000		100	0	0" "1760000000	alloy	1000	2000	x	100	0	0" \
+    "1760000000	minio	1000	2000	900	100	0	0"; do
+    {
+      samples 10
+      printf '%s\n' "$bad"
+    } >"$peaks"
+    run bash "$script" --check-samples "$peaks"
+    [ "$status" -ne 0 ]
+  done
+  samples 9 >"$peaks"
+  run bash "$script" --check-samples "$peaks"
+  [ "$status" -ne 0 ]
+}

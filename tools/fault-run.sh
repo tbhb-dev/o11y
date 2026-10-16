@@ -7,6 +7,7 @@
 #   tools/fault-run.sh
 #   tools/fault-run.sh --check-peaks <peaks file>
 #   tools/fault-run.sh --check-load <inspect status> <inspect output>
+#   tools/fault-run.sh --check-samples <samples file>
 #
 # Client load is telemetrygen at 50 items a second per signal through the
 # published ports. During the outage, the receipt check for traces and logs
@@ -22,8 +23,9 @@
 # The record stays in tmp/fault-run/: samples.tsv (raw), checks.log (what
 # each check reported) and summary.txt (peaks per container, and whether
 # anon stayed under 70 percent of its limit). It holds placeholder values
-# only. --check-peaks and --check-load run only the memory verdict or the
-# load generator verdict, which is how tools/fault-run.bats tests them.
+# only. --check-peaks, --check-load and --check-samples run only the memory
+# verdict, the load generator verdict or the sampler verdict, which is how
+# tools/fault-run.bats tests them.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -36,6 +38,22 @@ source tools/lib.sh
 peaks_ok() {
   # shellcheck disable=SC2016 # awk's own fields
   awk 'NF != 10 || $7 + 0 >= 70 { bad = 1 } END { exit bad || NR != 6 }' "$1"
+}
+
+# samples_ok <samples file>: every line is a sample of eight tab-separated
+# fields for one of the six services, every number a whole number, and each
+# service has at least 10 samples. Anything else, an ERROR line from the
+# sampler or a shell message among them, fails.
+samples_ok() {
+  awk -F '\t' '
+    BEGIN { split("rustfs loki tempo mimir alloy grafana", w, " "); for (i in w) known[w[i]] = 1 }
+    {
+      good = NF == 8 && ($2 in known)
+      for (i = 1; good && i <= NF; i++) if (i != 2 && $i !~ /^[0-9]+$/) good = 0
+      if (!good) bad = 1
+      else count[$2]++
+    }
+    END { for (s in known) if (count[s] < 10) bad = 1; exit bad }' "$1"
 }
 
 # load_ok <inspect status> <inspect output>: the inspect of a load generator
@@ -53,8 +71,13 @@ case ${1:-} in
   load_ok "$2" "$3"
   exit
   ;;
+--check-samples)
+  samples_ok "$2"
+  exit
+  ;;
 esac
 
+local_engine_only
 pin_docker_api
 
 project=o11y-fault
@@ -172,20 +195,31 @@ for service in "${services[@]}"; do
   id=$(docker inspect -f '{{.Id}}' "$container")
   targets+="$service:$id "
 done
+# Each value is read on its own and must be a whole number. A read that
+# fails while the container's directory still exists prints an ERROR line,
+# which fails the verdict; a container stopped in between just has no line.
 # shellcheck disable=SC2016 # the helper's shell expands these
 docker run -d --name "$project-sampler" --cgroupns=host --network none --user 0:0 --entrypoint /bin/sh \
   -v /sys/fs/cgroup:/sys/fs/cgroup:ro -e "TARGETS=$targets" "$util_image" -c '
+num() { case $1 in "" | *[!0-9]*) return 1 ;; esac; }
+field() { awk -v k="$1" "\$1 == k { print \$2; found = 1 } END { exit !found }" "$2"; }
 while :; do
-  now=$(date +%s)
+  now=$(date +%s) || now=
   for t in $TARGETS; do
+    s=${t%%:*}
     # cgroupfs and systemd drivers name the directory differently. A
     # stopped container has none.
     d=/sys/fs/cgroup/docker/${t#*:}
     [ -d "$d" ] || d=/sys/fs/cgroup/system.slice/docker-${t#*:}.scope
     [ -d "$d" ] || continue
-    printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$now" "${t%%:*}" "$(cat "$d/memory.current")" "$(cat "$d/memory.peak")" \
-      "$(awk "\$1 == \"anon\" { print \$2 }" "$d/memory.stat")" "$(awk "\$1 == \"file\" { print \$2 }" "$d/memory.stat")" \
-      "$(awk "\$1 == \"oom\" { print \$2 }" "$d/memory.events")" "$(awk "\$1 == \"oom_kill\" { print \$2 }" "$d/memory.events")"
+    if cur=$(cat "$d/memory.current") && peak=$(cat "$d/memory.peak") &&
+      anon=$(field anon "$d/memory.stat") && file=$(field file "$d/memory.stat") &&
+      oom=$(field oom "$d/memory.events") && kills=$(field oom_kill "$d/memory.events") &&
+      num "$now" && num "$cur" && num "$peak" && num "$anon" && num "$file" && num "$oom" && num "$kills"; then
+      printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n" "$now" "$s" "$cur" "$peak" "$anon" "$file" "$oom" "$kills"
+    elif [ -d "$d" ]; then
+      printf "ERROR\t%s\ta cgroup memory file could not be read or held no whole number\n" "$s"
+    fi
   done
   sleep 5
 done' >/dev/null
@@ -226,8 +260,11 @@ for signal in traces logs metrics; do
   state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$project-load-$signal") || status=$?
   load_ok "$status" "$state" || die "the $signal load generator failed or could not be inspected (${state:-no state})"
 done
-docker logs "$project-sampler" >"$out/samples.tsv" 2>&1
+sampler=$(docker inspect -f '{{.State.Status}}' "$project-sampler") || die "the sampler could not be inspected"
+[[ $sampler == running ]] || die "the sampler stopped before the end of the run"
+docker logs "$project-sampler" >"$out/samples.tsv" 2>&1 || die "the sampler's record could not be read"
 docker rm -f "$project-sampler" >/dev/null
+check "the sampler read every cgroup memory file it tried, with at least 10 samples per container" samples_ok "$out/samples.tsv"
 
 flags() {
   local service
@@ -243,7 +280,7 @@ check "no container was OOM-killed or restarted" awk '$2 != "false" || $3 != 0 {
 
 # Peaks per container, against the container's memory limit.
 awk 'NR == FNR { limit[$1] = $4; next }
-  NF != 8 || !($2 in limit) { next }
+  NF != 8 || !($2 in limit) { next }  # samples_ok has failed the run on these already
   { if ($3 > cur[$2]) cur[$2] = $3; if ($4 > peak[$2]) peak[$2] = $4; if ($5 > anon[$2]) anon[$2] = $5
     if ($6 > file[$2]) file[$2] = $6; oom[$2] = $7; kill[$2] = $8; n[$2]++ }
   END {
