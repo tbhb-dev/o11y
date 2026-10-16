@@ -154,11 +154,13 @@ receipt() {
 }
 
 mimir_query() {
-  curl -s -m 15 -G --data-urlencode "query=$1" "$grafana/api/datasources/proxy/uid/mimir/api/v1/query"
+  curl -fsS -m 15 -G --data-urlencode "query=$1" "$grafana/api/datasources/proxy/uid/mimir/api/v1/query"
 }
 
 rustfs_pushed() {
-  mimir_query 'rustfs_start_total{job="o11y/rustfs"}' | jq -e '.data.result | length == 1' >/dev/null
+  local body
+  body=$(mimir_query 'rustfs_start_total{job="o11y/rustfs"}') || return 1
+  jq -e '.data.result | length == 1' <<<"$body" >/dev/null
 }
 
 rm -rf "$out"
@@ -250,8 +252,9 @@ main start mimir >/dev/null 2>&1 || die "mimir could not be started again"
 wait_ready mimir
 check "Mimir is back: the receipt check passes for metrics" receipt metrics
 self_overflowed() {
-  mimir_query 'max_over_time(otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy", component_id="otelcol.exporter.otlphttp.mimir_self"}[15m])' |
-    jq -e '.data.result | length == 1 and (.[0].value[1] | tonumber) > 0' >/dev/null
+  local body
+  body=$(mimir_query 'max_over_time(otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy", component_id="otelcol.exporter.otlphttp.mimir_self"}[15m])') || return 1
+  jq -e '.data.result | length == 1 and (.[0].value[1] | tonumber) > 0' <<<"$body" >/dev/null
 }
 check "the shrunk self queue overflowed during the outage, and Alloy counted the points it could not queue" poll 180 self_overflowed
 sleep 60
