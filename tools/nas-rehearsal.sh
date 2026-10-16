@@ -292,12 +292,8 @@ ok "rehearsal: rollback --previous runs the base release again"
 # base's Up panels must show exactly the jobs the base scrapes, each up.
 # With Alloy stopped and Mimir still answering, the last samples age, and
 # the panels must drop them rather than show the jobs up.
-base_up=$({
-  grep -o '"job" = "[^"]*"' "$base_work/config/alloy/config.alloy" | cut -d'"' -f4
-  # RustFS pushes rather than being scraped, from the release that added
-  # the self receiver on.
-  ! grep -q '^otelcol.receiver.otlp "self"' "$base_work/config/alloy/config.alloy" || echo o11y/rustfs
-} | jq -Rsc 'split("\n") | map(select(. != "")) | map([., "1"]) | sort')
+base_jobs=$(expected_up_jobs "$base_work/config/alloy/config.alloy") || die "rehearsal: the base's jobs could not be read from its config.alloy"
+base_up=$(jq -Rsc 'split("\n") | map(select(. != "")) | map([., "1"]) | sort' <<<"$base_jobs") || die "rehearsal: the base's jobs could not be listed"
 poll 180 seed_and_read ". == $base_up" || die "rehearsal: after rollback --previous, with a fresh seed series in Mimir, the Up panels do not show exactly the base's jobs up"
 alloy=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)
 docker stop "$alloy" >/dev/null

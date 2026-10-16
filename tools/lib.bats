@@ -339,3 +339,60 @@ mimir_exposition() {
   run otlp_parse_discards < <(mimir_exposition 'cortex_discarded_samples_total{reason="otlp_parse_error"} garbage')
   [ "$status" -ne 0 ]
 }
+
+# The masked statuses these helpers replace: each "old" case shows the
+# negated construction passing on input it should fail.
+
+@test "lacks reads all of its input and tells a match, no match and a failed grep apart" {
+  run bash -c 'set -o pipefail; ! { echo dump; seq 1 200000; } | grep -q -v "^[0-9]"'
+  [ "$status" -eq 0 ]
+  run bash -c "set -o pipefail; source '$BATS_TEST_DIRNAME/lib.sh'; { echo dump; seq 1 200000; } | lacks -v '^[0-9]'"
+  [ "$status" -eq 1 ]
+  run bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; seq 1 10 | lacks -v '^[0-9]'"
+  [ "$status" -eq 0 ]
+  run bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; seq 1 10 | lacks -E '('"
+  [ "$status" -eq 2 ]
+}
+
+@test "json_after_start fails on a non-JSON line after the start, however long the log" {
+  run bash -c 'set -o pipefail; ! { echo "Starting: /usr/bin/rustfs"; seq 1 200000; } | sed 1d | grep -q -v "^{"'
+  [ "$status" -eq 0 ]
+  run bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; { echo 'Starting: /usr/bin/rustfs'; seq 1 200000; } | json_after_start"
+  [ "$status" -eq 3 ]
+  run bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; printf 'Initializing\nStarting: /usr/bin/rustfs\n{\"a\":1}\r\n' | json_after_start"
+  [ "$status" -eq 0 ]
+  run bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; echo '{\"a\":1}' | json_after_start"
+  [ "$status" -eq 4 ]
+}
+
+@test "files_differ accepts only a difference, and a comparison error is neither" {
+  echo a >"$dir/a"
+  echo b >"$dir/b"
+  echo a >"$dir/same"
+  echo a >"$dir/locked"
+  chmod 000 "$dir/locked"
+  [[ ! -r $dir/locked ]] || skip "runs as a user who can read any file"
+  run bash -c "! cmp -s '$dir/a' '$dir/locked'"
+  [ "$status" -eq 0 ]
+  run files_differ "$dir/a" "$dir/b"
+  [ "$status" -eq 0 ]
+  run files_differ "$dir/a" "$dir/same"
+  [ "$status" -eq 1 ]
+  run files_differ "$dir/a" "$dir/locked"
+  [ "$status" -eq 2 ]
+}
+
+@test "expected_up_jobs fails when its search fails, even after printing the jobs" {
+  printf '%s\n' 'prometheus.scrape "a" {' '	targets = [{"__address__" = "a:1", "job" = "o11y/a"}]' '}' 'otelcol.receiver.otlp "self" {' >"$dir/config.alloy"
+  run expected_up_jobs "$dir/config.alloy"
+  [ "$status" -eq 0 ]
+  [ "$output" = "o11y/a
+o11y/rustfs" ]
+  mkdir -p "$dir/bin"
+  printf '%s\n' '#!/bin/sh' 'echo "\"job\" = \"o11y/a\""' 'exit 2' >"$dir/bin/grep"
+  chmod +x "$dir/bin/grep"
+  run env PATH="$dir/bin:$PATH" bash -c "set -o pipefail; { grep -o x '$dir/config.alloy' | cut -d'\"' -f4; ! grep -q y '$dir/config.alloy' || echo o11y/rustfs; } | jq -Rsc 'split(\"\\n\")'"
+  [ "$status" -eq 0 ]
+  PATH="$dir/bin:$PATH" run expected_up_jobs "$dir/config.alloy"
+  [ "$status" -ne 0 ]
+}

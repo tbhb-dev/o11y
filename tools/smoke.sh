@@ -303,8 +303,14 @@ home=$(curl -fs -m 15 "$grafana/api/dashboards/home" | jq -r '.redirectUri') && 
 main logs --no-log-prefix grafana >"$out/grafana.log" 2>&1 || die "4: the Grafana log could not be read"
 # A log without provisioning lines would pass the error check vacuously.
 grep -qi 'provisioning' "$out/grafana.log" || die "4: the Grafana log shows no provisioning at all"
-! grep -i 'provisioning' "$out/grafana.log" | grep -qiE 'level=(error|warn)' ||
-  die "4: the Grafana log has a provisioning error"
+provisioning=$(grep -i 'provisioning' "$out/grafana.log") || die "4: the Grafana log's provisioning lines could not be read"
+status=0
+lacks -iE 'level=(error|warn)' <<<"$provisioning" || status=$?
+case $status in
+0) ;;
+1) die "4: the Grafana log has a provisioning error" ;;
+*) die "4: the Grafana log's provisioning lines could not be searched" ;;
+esac
 ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, the home dashboard is set, provisioning is clean"
 
 # 5. Exact receipt of one trace, log and metric over OTLP/HTTP, plus one
@@ -469,8 +475,13 @@ jq -e '.data.result | length == 0' <<<"$body" >/dev/null || die "7: RustFS sent 
 rustfs_log=$(main logs --no-log-prefix rustfs 2>&1) || die "7: RustFS's log could not be read"
 rustfs_log_ok <<<"$rustfs_log" || die "7: RustFS's start lines are no longer on its stdout"
 grep -q '^Starting: ' <<<"$rustfs_log" || die "7: RustFS's log has no entrypoint start line"
-! tr -d '\r' <<<"$rustfs_log" | sed -n '/^Starting: /,$p' | sed 1d | grep -q -v '^{' ||
-  die "7: RustFS printed something other than JSON log lines, such as an exporter dump"
+status=0
+json_after_start <<<"$rustfs_log" || status=$?
+case $status in
+0) ;;
+3) die "7: RustFS printed something other than JSON log lines, such as an exporter dump" ;;
+*) die "7: RustFS's log could not be checked for lines other than JSON" ;;
+esac
 ok "7: RustFS's allowlisted metrics arrive as o11y/rustfs with the stack's identity, no traces or logs, and its stdout keeps the start lines"
 
 # 8. A release only recreates what changed. The same tree rendered again

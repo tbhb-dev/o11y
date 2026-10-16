@@ -168,7 +168,13 @@ mkdir -p "$out"
 tools/render.sh "$work" >/dev/null
 alloy_config=$(grep '^O11Y_CONFIG_ALLOY=' "$release/.env" | cut -d= -f2-)/config.alloy
 sed -i.orig '/^otelcol.exporter.otlphttp "mimir_self"/,/^}/s/queue_size = [0-9]*/queue_size = 200/' "$alloy_config"
-! cmp -s "$alloy_config" "$alloy_config.orig" || die "the self exporter's queue could not be shrunk for this run"
+status=0
+files_differ "$alloy_config" "$alloy_config.orig" || status=$?
+case $status in
+0) ;;
+1) die "the self exporter's queue could not be shrunk for this run" ;;
+*) die "the shrunk Alloy config could not be compared with the original" ;;
+esac
 rm "$alloy_config.orig"
 model=$("$O11Y_COMPOSE" -p "$project" --profile tools --env-file "$release/.env.validate" \
   -f "$release/compose.yaml" -f "$release/compose.tools.yaml" -f "$release/compose.init.yaml" config --format json)

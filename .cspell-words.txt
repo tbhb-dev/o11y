@@ -14,6 +14,7 @@ PYTHONUTF
 Perc
 Promtail
 RUSTFS
+SIGPIPE
 Tempo
 acked
 ahostsv
@@ -27,6 +28,7 @@ cksum
 deltatocumulative
 devtools
 dscacheutil
+elif
 esac
 findutils
 forcepathstyle
