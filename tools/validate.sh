@@ -145,6 +145,7 @@ for component in loki tempo mimir alloy; do
     echo "FAIL $component: the validator did not run on the invalid fixture (exit $status)" >&2
     cat "$log" >&2
     failed=1
+  # lint-negated: allow a failed search fails the component too
   elif ! grep -qF -- "$(rejection "$component")" "$log"; then
     echo "FAIL $component: the invalid fixture failed without naming what is broken in it" >&2
     cat "$log" >&2
