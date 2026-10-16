@@ -2,7 +2,7 @@
 
 Configuration for a self-hosted observability stack built from Grafana, Loki, Tempo, Mimir and Grafana Alloy, run with Docker Compose.
 
-One Compose project runs the six services. Grafana Alloy receives OpenTelemetry data over gRPC and HTTP and forwards each signal to its backend, Tempo for traces, Loki for logs, and Mimir for metrics. RustFS is the S3 object store behind those three, and Grafana reads from them. Published ports bind to loopback, and Tailscale Services put Grafana and the OpenTelemetry endpoint on the tailnet.
+One Compose project runs the six services. Grafana Alloy receives OpenTelemetry data over gRPC and HTTP and forwards each signal to its backend, Tempo for traces, Loki for logs, and Mimir for metrics. Mimir takes only cumulative metrics, so Alloy converts the delta sums that clients such as Claude Code and Codex send. RustFS is the S3 object store behind those three, and Grafana reads from them. Published ports bind to loopback, and Tailscale Services put Grafana and the OpenTelemetry endpoint on the tailnet.
 
 ## Development
 

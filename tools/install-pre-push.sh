@@ -55,8 +55,10 @@ if [[ ${1-} == --check ]]; then
     echo "install-pre-push: CI has no local hooks to check"
     exit 0
   fi
+  # A read that prints the right hook and then fails is no proof it's installed.
+  expected=$(wrapper)
   if is_wrapper "$hooks/pre-push" && is_prek "$hooks/pre-push.prek" &&
-    [[ $(wrapper) == "$(cat "$hooks/pre-push")" ]]; then
+    installed=$(cat "$hooks/pre-push") && [[ $installed == "$expected" ]]; then
     exit 0
   fi
   echo "install-pre-push: the leak-check pre-push hook isn't installed; run mise run bootstrap" >&2

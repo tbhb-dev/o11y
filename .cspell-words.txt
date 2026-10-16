@@ -24,6 +24,7 @@ buildx
 cgroupfs
 cgroupns
 cksum
+deltatocumulative
 devtools
 dscacheutil
 esac

@@ -83,6 +83,7 @@ finish() {
     wait "$writer" 2>/dev/null || true
   fi
   rm -rf "$scratch"
+  # shellcheck disable=SC2312 # type -t fails with nothing for a name that isn't defined, which is the case tested
   [[ $(type -t cleanup) != function ]] || cleanup
 }
 trap finish EXIT
@@ -95,6 +96,7 @@ if [[ -z $release ]]; then
   out=$root/tmp/probe
   release=$out/release
   O11Y_DATA_DIR=$(test_data_dir probe)
+  # shellcheck disable=SC2312 # id doesn't fail
   O11Y_SECRETS_OWNER=$(id -u):$(id -g)
   export O11Y_DATA_DIR O11Y_SECRETS_OWNER O11Y_GRAFANA_ROOT_URL=http://127.0.0.1:13000/
 
@@ -123,7 +125,8 @@ else
 fi
 
 ready() {
-  [[ $(main exec -T rustfs curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready) == 200 ]]
+  # lint-curl: allow the status code is the answer, which output_is compares with 200
+  output_is 200 main exec -T rustfs curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9000/health/ready
 }
 
 main up -d rustfs >/dev/null 2>&1 || die "rustfs did not start"
@@ -134,6 +137,7 @@ ok "1: start log is clean and reports the console off"
 
 # curl exits 7 when nothing accepts the connection.
 status=0
+# lint-curl: allow the exit status is the answer, and only 7 passes
 main exec -T rustfs curl -s -o /dev/null -m 5 http://127.0.0.1:9001/ || status=$?
 [[ $status -eq 7 ]] || die "2: something answers on the console port"
 ok "2: ready on 9000 and nothing listens on 9001"
@@ -156,6 +160,7 @@ if ! wait "$writer"; then
   die "5: an acknowledged write was lost or a listed key is unreadable after a kill"
 fi
 writer=
+# shellcheck disable=SC2312 # the count is only reported
 ok "5: $(grep -o '[0-9]* acknowledged writes survived' "$crash_log") a kill and restart, and every listed key is readable"
 
 s3probe cleanup || die "6: the probe bucket could not be removed"

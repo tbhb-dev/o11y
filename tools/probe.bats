@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 # config/probe/probe.sh against a stub aws: a listing that fails must never
-# read as an empty bucket.
+# read as an empty bucket, and two hashes that failed must never match.
 
 setup() {
   dir=$(mktemp -d)
@@ -66,4 +66,12 @@ teardown() {
   UNREADABLE=1 run sh "$probe" listed-keys
   [ "$status" -ne 0 ]
   [[ $output == *"listed key crash/1 is unreadable"* ]]
+}
+
+@test "a round trip fails when the content can't be hashed, rather than comparing two empty hashes" {
+  printf '#!/bin/sh\necho "sha256sum: read error" >&2\nexit 1\n' >"$dir/sha256sum"
+  chmod +x "$dir/sha256sum"
+  run sh "$probe" objects
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be hashed"* ]]
 }

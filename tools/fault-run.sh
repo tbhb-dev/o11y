@@ -105,6 +105,7 @@ main() {
 }
 
 inside() {
+  # lint-curl: allow the caller compares the status code it prints
   main exec -T rustfs curl -s -o /dev/null -w '%{http_code}' -m 10 "$@"
 }
 

@@ -133,6 +133,8 @@ services:
       - --storage.path=/var/lib/alloy/data
       - --server.http.listen-addr=0.0.0.0:12345
       - --disable-reporting
+      # Only for otelcol.processor.deltatocumulative; see config.alloy.
+      - --stability.level=experimental
     # The Go runtime collects harder below this soft target, ahead of the
     # kernel's mem_limit. The grace period lets a stop with healthy backends
     # drain the queues.

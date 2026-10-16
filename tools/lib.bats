@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
-# The sentinel search the boot test ends with: it must fail on a leak, name
-# the place and never print the value.
+# The helpers the boot test relies on. The sentinel search must fail on a
+# leak, name the place and never print the value, and a check on output
+# must also fail when its command does.
 
 setup() {
   # shellcheck source=tools/lib.sh
@@ -15,6 +16,7 @@ setup() {
 }
 
 teardown() {
+  [[ ! -f $dir/sockets.list ]] || xargs kill <"$dir/sockets.list" 2>/dev/null || true
   rm -rf "$dir"
 }
 
@@ -159,13 +161,38 @@ case "$1 $2" in
 esac
 STUB
   chmod +x "$dir/bin/docker"
-  export PATH="$dir/bin:$PATH" STUB_LOG=$dir/docker.log STUB_CONTEXT=default STUB_ENDPOINT=unix:///var/run/docker.sock
+  export PATH="$dir/bin:$PATH" STUB_LOG=$dir/docker.log STUB_CONTEXT=default
+  # The endpoint is a real socket on one of the daemon's own paths: under
+  # a throwaway HOME on macOS, the host's own daemon socket on Linux.
   if host_is_linux; then
     STUB_INFO="$(uname -n)|Ubuntu 24.04"
+    local path
+    for path in /var/run/docker.sock /run/docker.sock; do
+      [[ -S $path ]] || continue
+      STUB_ENDPOINT=unix://$path
+      break
+    done
+    [[ -n ${STUB_ENDPOINT:-} ]] || skip "needs a local daemon socket on Linux"
   else
     STUB_INFO="docker-desktop|Docker Desktop"
+    export HOME=$dir/home
+    mkdir -p "$HOME/.docker/run"
+    make_socket "$HOME/.docker/run/docker.sock"
+    STUB_ENDPOINT=unix://$HOME/.docker/run/docker.sock
   fi
-  export STUB_INFO
+  export STUB_INFO STUB_ENDPOINT
+}
+
+# make_socket <path>: a listening unix socket there, for as long as the
+# test runs.
+make_socket() {
+  python3 -c 'import socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(600)' "$1" &
+  echo $! >>"$dir/sockets.list"
+  local tries=0
+  until [[ -S $1 ]]; do
+    ((tries++ < 50)) || return 1
+    sleep 0.1
+  done
 }
 
 @test "the local engine guard drops an inherited remote endpoint before any call" {
@@ -208,4 +235,107 @@ STUB
     [[ $output == *"local engine:"* ]] || false
     [ ! -e "$dir/docker.log.work" ]
   done
+}
+
+@test "a socket that isn't the daemon's own, or a daemon path that isn't a socket, stops before any engine work" {
+  engine_stub
+  make_socket "$dir/forwarded.sock"
+  STUB_ENDPOINT=unix://$dir/forwarded.sock run local_engine_only
+  [ "$status" -ne 0 ]
+  [[ $output == *"does not use this machine's own daemon socket"* ]] || false
+  [[ $output != *forwarded* ]] || false
+  ! grep -q '|info ' "$dir/docker.log" || false
+  if ! host_is_linux; then
+    kill "$(cat "$dir/sockets.list" | head -n 1)" 2>/dev/null || true
+    rm -f "$HOME/.docker/run/docker.sock"
+    : >"$HOME/.docker/run/docker.sock"
+    run local_engine_only
+    [ "$status" -ne 0 ]
+    ! grep -q '|info ' "$dir/docker.log" || false
+  fi
+}
+
+@test "docker's own error output, with the context name and socket path, never reaches the task's output" {
+  engine_stub
+  cat >"$dir/bin/docker" <<'STUB'
+#!/bin/sh
+echo "context canary-ctx-name at canary-socket-path: connection refused" >&2
+case "$1 $2" in
+"context show") [ -n "${STUB_FAIL_SHOW:-}" ] && exit 1; echo default ;;
+"context inspect") [ -n "${STUB_FAIL_INSPECT:-}" ] && exit 1; echo "$STUB_ENDPOINT" ;;
+*) exit 1 ;;
+esac
+STUB
+  for failing in STUB_FAIL_SHOW STUB_FAIL_INSPECT STUB_FAIL_INFO; do
+    run env "$failing=1" bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; local_engine_only"
+    [ "$status" -ne 0 ]
+    [[ $output == *"local engine:"* ]] || false
+    [[ $output != *canary* ]] || false
+  done
+}
+
+@test "the rehearsal's inside half, started directly, stops before any engine call" {
+  engine_stub
+  run bash "$BATS_TEST_DIRNAME/nas-rehearsal.sh" --inside
+  [ "$status" -ne 0 ]
+  [[ $output == *"--inside runs only in the container the rehearsal starts"* ]] || false
+  REHEARSAL_ENGINE="docker-desktop|Docker Desktop" DOCKER_HOST=tcp://nas.example.invalid:2376 \
+    run bash "$BATS_TEST_DIRNAME/nas-rehearsal.sh" --inside
+  [ "$status" -ne 0 ]
+  [ ! -e "$dir/docker.log" ]
+}
+
+@test "output_is passes a command that succeeds with exactly the expected output" {
+  stub probe
+  STUB_OUT=200 run output_is 200 probe
+  [ "$status" -eq 0 ]
+}
+
+@test "output_is fails a command that prints the expected output and then fails" {
+  stub probe
+  STUB_OUT=200 STUB_EXIT=28 run output_is 200 probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that fails with nothing where nothing is expected" {
+  stub probe
+  STUB_EXIT=1 run output_is '' probe
+  [ "$status" -eq 1 ]
+}
+
+@test "output_is fails a command that succeeds with other output" {
+  stub probe
+  STUB_OUT=503 run output_is 200 probe
+  [ "$status" -eq 1 ]
+}
+
+# otlp_parse_discards reads Mimir's own /metrics.
+mimir_exposition() {
+  printf '%s\n' '# HELP cortex_build_info A metric with a constant 1 value.' '# TYPE cortex_build_info gauge' 'cortex_build_info{version="3.2.2"} 1' "$@"
+}
+
+@test "Mimir's exposition without a discard series counts as no discards" {
+  run otlp_parse_discards < <(mimir_exposition)
+  [ "$status" -eq 0 ]
+  [ "$output" = 0 ]
+}
+
+@test "otlp_parse_error discards are summed across their series and other reasons are left out" {
+  run otlp_parse_discards < <(mimir_exposition \
+    'cortex_discarded_samples_total{group="",reason="otlp_parse_error",user="anonymous"} 1' \
+    'cortex_discarded_samples_total{group="a",reason="otlp_parse_error",user="anonymous"} 2' \
+    'cortex_discarded_samples_total{group="",reason="sample_out_of_order",user="anonymous"} 40')
+  [ "$status" -eq 0 ]
+  [ "$output" = 3 ]
+}
+
+@test "an error page is not Mimir's exposition and fails rather than counting as no discards" {
+  run otlp_parse_discards <<<'404 page not found'
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "a discard series without a number fails" {
+  run otlp_parse_discards < <(mimir_exposition 'cortex_discarded_samples_total{reason="otlp_parse_error"} garbage')
+  [ "$status" -ne 0 ]
 }

@@ -34,13 +34,14 @@ cli_image=docker:29.0.1-cli@sha256:f7d048590d889e00868920f658e807ecbc4ef662d51c9
 compose_version=2.20.1
 projects=(o11y o11y-gate)
 
-# leftovers: what the two projects still have on the engine.
+# leftovers: what the two projects still have on the engine. It fails when
+# the engine can't be asked, which must not read as nothing left.
 leftovers() {
   local project
   for project in "${projects[@]}"; do
-    docker ps -aq --filter "label=com.docker.compose.project=$project"
-    docker network ls -q --filter "label=com.docker.compose.project=$project"
-    docker volume ls -q --filter "label=com.docker.compose.project=$project"
+    docker ps -aq --filter "label=com.docker.compose.project=$project" || return 1
+    docker network ls -q --filter "label=com.docker.compose.project=$project" || return 1
+    docker volume ls -q --filter "label=com.docker.compose.project=$project" || return 1
   done
 }
 
@@ -48,7 +49,7 @@ if [[ ${1:-} != --inside ]]; then
   local_engine_only
   base=${1:-origin/main}
   base_commit=$(git rev-parse --short "$base^{commit}") || die "the base $base is not a commit"
-  [[ -z $(leftovers) ]] ||
+  output_is '' leftovers ||
     die "a container, network or volume of project o11y or o11y-gate exists on this engine; the rehearsal uses those names and leaves them alone"
   util_image=$(sed -n 's/^ *image: \(rustfs\/rustfs:.*\)$/\1/p' compose.yaml | head -n 1)
   base_dir=$root/tmp/rehearsal-base
@@ -63,14 +64,20 @@ if [[ ${1:-} != --inside ]]; then
   git archive "$base_commit" | tar -x -C "$base_dir"
   head_commit=$(git rev-parse --short HEAD)
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$scratch:$scratch" -v "$root:/src:ro" -v "$base_dir:/base:ro" \
-    -e "REHEARSAL_COMMIT=$head_commit" -e "REHEARSAL_BASE_COMMIT=$base_commit" "$cli_image" \
+    -e "REHEARSAL_COMMIT=$head_commit" -e "REHEARSAL_BASE_COMMIT=$base_commit" -e "REHEARSAL_ENGINE=$engine_identity" "$cli_image" \
     sh -c 'apk add --no-cache bash coreutils curl findutils jq tar >/dev/null && exec bash /src/tools/nas-rehearsal.sh --inside'
-  [[ -z $(leftovers) ]] || die "the rehearsal left a container, network or volume behind"
+  output_is '' leftovers || die "the rehearsal left a container, network or volume behind"
   ok "rehearsal: nothing of projects o11y and o11y-gate is left on the engine"
   exit
 fi
 
 # --- inside the container -------------------------------------------------
+
+# Only the outside run starts this half, in its container, and hands it the
+# engine it verified. Run any other way, it stops before any engine call.
+[[ -f /.dockerenv && -n ${REHEARSAL_ENGINE:-} ]] ||
+  die "rehearsal: --inside runs only in the container the rehearsal starts"
+local_engine_only "$REHEARSAL_ENGINE"
 
 work=/work
 base_work=/base-work
@@ -83,7 +90,8 @@ arch=$(uname -m)
 url=https://github.com/docker/compose/releases/download/v$compose_version/docker-compose-linux-$arch
 curl -fsSL -o "$compose" "$url"
 expected=$(curl -fsSL "$url.sha256" | cut -d' ' -f1)
-[[ $(sha256sum "$compose" | cut -d' ' -f1) == "$expected" ]] || die "the Compose $compose_version download does not match its checksum"
+actual=$(sha256sum "$compose" | cut -d' ' -f1)
+[[ $actual == "$expected" ]] || die "the Compose $compose_version download does not match its checksum"
 chmod +x "$compose"
 
 stub() {
@@ -227,6 +235,7 @@ seed() {
   rustfs=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=rustfs) || return 1
   [[ -n $rustfs ]] || return 1
   printf '%s' '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"rehearsal-seed"}},{"key":"service.namespace","value":{"stringValue":"o11y"}}]},"scopeMetrics":[{"metrics":[{"name":"up","gauge":{"dataPoints":[{"asDouble":1,"timeUnixNano":"'"$now"'000000000"}]}}]}]}]}' |
+    # lint-curl: allow the status code it prints must be 200
     docker exec -i "$rustfs" curl -s -o /dev/null -w '%{http_code}' -m 10 -H 'Content-Type: application/json' \
       --data-binary @- http://alloy:4318/v1/metrics | grep -qx 200
 }
@@ -255,22 +264,27 @@ current=$(pointer current) || die "rehearsal: the current pointer could not be r
 ok "rehearsal: the first deploy, of the base, is current"
 
 status=$(step "status failed" status)
-[[ $(grep -c ' ready$' <<<"$status") -eq 6 ]] || die "rehearsal: status does not report all six services ready"
+output_is 6 grep -c ' ready$' <<<"$status" || die "rehearsal: status does not report all six services ready"
 grep -q "(release ${first#releases/}) Up" <<<"$status" || die "rehearsal: status does not name the running release"
 ok "rehearsal: status reports six ready services and the running release"
-[[ -n $(bash tools/nas.sh logs loki) ]] || die "rehearsal: logs printed nothing"
+# The task prints a line of its own, so only a line of Loki's log shows
+# that it printed the log.
+logs=$(step "logs failed" logs loki)
+grep -q 'level=' <<<"$logs" || die "rehearsal: logs printed no line of Loki's log"
 ok "rehearsal: logs prints Loki's log"
 
 sleep 1
 step "the second deploy failed" deploy
 second=releases/$(cat tmp/deploy/staged)
-[[ $second != "$first" && $(pointer current) == "$second" && $(pointer previous) == "$first" ]] ||
+if [[ $second == "$first" ]] || ! output_is "$second" pointer current || ! output_is "$first" pointer previous; then
   die "rehearsal: the second deploy did not move previous and current"
+fi
 ok "rehearsal: second deploy, of this tree, is current, the base is previous"
 
 poll 120 seed || die "rehearsal: the seed series could not be written"
 step "rollback --previous failed" rollback --previous
-grep -q "(release ${first#releases/}) Up" <<<"$(bash tools/nas.sh status)" ||
+status=$(step "status failed" status)
+grep -q "(release ${first#releases/}) Up" <<<"$status" ||
   die "rehearsal: after rollback --previous the containers do not run the base release"
 ok "rehearsal: rollback --previous runs the base release again"
 # This tree's release wrote series of its own, which stay in Mimir after the
@@ -285,14 +299,15 @@ base_up=$({
   ! grep -q '^otelcol.receiver.otlp "self"' "$base_work/config/alloy/config.alloy" || echo o11y/rustfs
 } | jq -Rsc 'split("\n") | map(select(. != "")) | map([., "1"]) | sort')
 poll 180 seed_and_read ". == $base_up" || die "rehearsal: after rollback --previous, with a fresh seed series in Mimir, the Up panels do not show exactly the base's jobs up"
-docker stop "$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+alloy=$(docker ps -q --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)
+docker stop "$alloy" >/dev/null
 poll 180 up_panels '. == []' || die "rehearsal: with Alloy stopped the Up panels still return their last samples"
-docker start "$(docker ps -aq --filter label=com.docker.compose.project=o11y --filter label=com.docker.compose.service=alloy)" >/dev/null
+docker start "$alloy" >/dev/null
 poll 180 up_panels ". == $base_up" || die "rehearsal: once Alloy is back the Up panels do not show the base's jobs up"
 ok "rehearsal: after rollback --previous the Up panels show exactly the base's jobs up, not a fresh seed series, and nothing once their samples are stale"
 
 step "down failed" down
-[[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y) ]] || die "rehearsal: down left containers"
+output_is '' docker ps -aq --filter label=com.docker.compose.project=o11y || die "rehearsal: down left containers"
 [[ -d $remote/data/secrets && -L $remote/current ]] || die "rehearsal: down removed more than the containers"
 ok "rehearsal: down removed the containers and kept data, secrets and releases"
 
@@ -306,12 +321,13 @@ planted=$remote/$first
 "$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" -f "$planted/compose.tools.yaml" \
   run -T --entrypoint /bin/true s3probe >/dev/null 2>&1 || die "rehearsal: the one-off s3probe container could not be planted"
 "$compose" -p o11y-gate --env-file "$planted/.env.validate" -f "$planted/compose.yaml" down >/dev/null 2>&1
-[[ -n $(one_offs) ]] || die "rehearsal: a plain down removed the one-off container, so the planted leftover proves nothing"
+planted_ids=$(one_offs)
+[[ -n $planted_ids ]] || die "rehearsal: a plain down removed the one-off container, so the planted leftover proves nothing"
 ok "rehearsal: a plain down keeps a stopped one-off s3probe container in o11y-gate"
 
 step "gate-test failed" gate-test
-[[ -z $(one_offs) ]] || die "rehearsal: gate-test left a one-off container behind"
-[[ -z $(docker ps -aq --filter label=com.docker.compose.project=o11y-gate) ]] || die "rehearsal: gate-test left containers"
+output_is '' one_offs || die "rehearsal: gate-test left a one-off container behind"
+output_is '' docker ps -aq --filter label=com.docker.compose.project=o11y-gate || die "rehearsal: gate-test left containers"
 step "gate-clean failed" gate-clean
 [[ ! -e $remote/gate && -d $remote/data ]] || die "rehearsal: gate-clean removed the wrong thing"
 ok "rehearsal: gate-test passed and stopped its project, gate-clean removed only the gate directory"

@@ -125,6 +125,7 @@ trace_found() {
 # seconds), in a window that starts a minute before the send.
 log_found() {
   local body
+  # shellcheck disable=SC2312 # date and jq's @uri over a string don't fail
   body=$(http "$grafana/api/datasources/proxy/uid/loki/loki/api/v1/query_range?query=$(uri "{service_name=\"$service\"}")&start=$((sent - 60))000000000&end=$(($(date +%s) + 60))000000000&limit=10") || return 1
   jq -e --arg b "o11y-check $run_id" --argjson min "$1" \
     '[.data.result[].values[]] | length == 1 and .[0][1] == $b and (.[0][0] | tonumber) >= $min * 1e9' \
@@ -143,6 +144,7 @@ metric_fresh() {
   body=$(mimir "query?query=$selector") || return 1
   jq -e --arg v "$value" '.data.result | length == 1 and .[0].value[1] == $v' <<<"$body" >/dev/null 2>&1 || return 1
   body=$(mimir "query?query=timestamp($selector)") || return 1
+  # shellcheck disable=SC2312 # date doesn't fail
   jq -e --argjson now "$(date +%s)" '.data.result[0].value[1] | tonumber >= $now - 120' <<<"$body" >/dev/null 2>&1
 }
 
@@ -150,12 +152,14 @@ metric_fresh() {
 # to the value sent.
 metric_stored() {
   local body
+  # shellcheck disable=SC2312 # date and jq's @uri over a string don't fail
   body=$(mimir "query_range?query=$(uri "o11y_check_value{run_id=\"$run_id\"}")&start=$((sent - 60))&end=$(date +%s)&step=15") || return 1
   jq -e --arg v "$value" '.data.result | length == 1 and any(.[0].values[]; .[1] == $v)' <<<"$body" >/dev/null 2>&1
 }
 
 grpc_found() {
   local body
+  # shellcheck disable=SC2312 # jq's @uri over a string doesn't fail
   body=$(http "$grafana/api/datasources/proxy/uid/tempo/api/search?q=$(uri "{resource.service.name=\"$grpc_service\"}")&limit=5") || return 1
   jq -e '.traces | length >= 1' <<<"$body" >/dev/null 2>&1
 }

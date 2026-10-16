@@ -195,6 +195,7 @@ of_project() {
 # util_cmd <host dir> <script>: root in a utility container with no network
 # and the directory at /d. It can reach the secret files, so it keeps no log.
 util_cmd() {
+  # shellcheck disable=SC2312 # q only quotes, and image_of reads the model load_model checked
   echo "$docker run --rm --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $1:/d $(image_of init) -c $(q "$2")"
 }
 
@@ -227,11 +228,13 @@ swap_cmd() {
 # failed probe left behind, unless it removes orphans. That is safe here
 # because it names the disposable project with compose.yaml alone.
 gate_down_cmd() {
+  # shellcheck disable=SC2312 # the command builders only echo
   echo "$(compose_cmd o11y-gate "$1" .env.validate compose.yaml) down --remove-orphans"
 }
 
 lock() {
   local status=0
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(lock_cmd)" || status=$?
   case $status in
   0) locked=1 ;;
@@ -254,6 +257,7 @@ cleanup() {
     [[ $status -eq 0 ]] || quiet remote "$(compose_cmd o11y-gate "$gate_release" .env.validate compose.yaml) logs --no-color --tail=500" || true
     # Only a failed run gets here: a passing gate-test stops the project
     # itself and reports it.
+    # shellcheck disable=SC2312 # the command builders only echo
     quiet remote "$(gate_down_cmd "$gate_release")" ||
       echo "FAIL $task: the o11y-gate project could not be stopped" >&9
   fi
@@ -400,6 +404,7 @@ image_of() {
 new_release_id() {
   local commit
   commit=$(git rev-parse --short HEAD) || die "$task: a release id needs the commit, and this is not a git checkout"
+  # shellcheck disable=SC2312 # date doesn't fail
   echo "$(date -u +%Y%m%dT%H%M%SZ)-$commit"
 }
 
@@ -414,6 +419,7 @@ verify_cmd() {
 }
 
 pull_cmd() {
+  # shellcheck disable=SC2312 # the command builders only echo
   echo "$(compose_cmd o11y "$dir/releases/$1" .env.validate compose.yaml compose.tools.yaml) --profile tools pull -q"
 }
 
@@ -424,12 +430,14 @@ pull_cmd() {
 upload() {
   local final=$2/$3 incoming=$2/.incoming-$3
   if remote "test -e $final"; then
+    # shellcheck disable=SC2312 # the command builders only echo
     quiet remote "$(verify_cmd "$final")" ||
       die "$task: $3 is already on the host and no longer matches its manifest. Nothing was changed; inspect it before staging again"
     return
   fi
   COPYFILE_DISABLE=1 tar -cf - -C "$1" . | quiet remote_stdin "mkdir $incoming && tar -xpf - -C $incoming" ||
     die "$task: the upload of $3 failed"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(verify_cmd "$incoming")" ||
     die "$task: $3 does not match its manifest after the upload. It was left under its temporary name and nothing was renamed"
   quiet remote "mv -T $incoming $final" || die "$task: $3 could not be renamed into place"
@@ -448,9 +456,11 @@ stage() {
   id=$(new_release_id)
   out=tmp/deploy/$id
   render_release "$out" o11y "$dir/data" "https://grafana.$O11Y_TAILNET_DOMAIN/" "$grafana_port" "$grpc_port" "$http_port"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(prepare_cmd "$dir/releases")" || die "$task: the release directories could not be prepared on the host"
   upload_configs "$out"
   upload "$out/release" "$dir/releases" "$id"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(pull_cmd "$id")" || die "$task: the images could not be pulled"
   echo "$id" >tmp/deploy/staged
   ok "$task: release $id is on the host, verified, and its images are pulled. Nothing was started"
@@ -458,10 +468,11 @@ stage() {
 
 # staged: the release the last stage produced, when it is of this commit.
 staged() {
-  local id
+  local id commit
   [[ -f tmp/deploy/staged ]] || return 0
   id=$(<tmp/deploy/staged)
-  [[ $id =~ $id_re && $id == *-"$(git rev-parse --short HEAD)" && -d tmp/deploy/$id/release ]] || return 0
+  commit=$(git rev-parse --short HEAD) || return 0
+  [[ $id =~ $id_re && $id == *-"$commit" && -d tmp/deploy/$id/release ]] || return 0
   echo "$id"
 }
 
@@ -471,6 +482,7 @@ staged() {
 # stopped ones included. `docker ps` reports state without the environment
 # that `docker inspect` would print.
 containers() {
+  # shellcheck disable=SC2312 # the command builders only echo
   remote "$docker ps -a $(of_project "$1") --format $(q '{{.Label "com.docker.compose.service"}} {{.Names}} {{.Label "com.docker.compose.project.config_files"}} {{.Status}}')"
 }
 
@@ -509,6 +521,7 @@ ready_url() {
 in_network() {
   local container=$1
   shift
+  # shellcheck disable=SC2312 # the command builders only echo
   remote_stdin "$docker exec -i $container curl $(q "$@")"
 }
 
@@ -534,6 +547,7 @@ all_ready() {
     return 1
   }
   for service in "${services[@]}"; do
+    # shellcheck disable=SC2312 # the command builders only echo
     poll "$timeout" is_ready "$rustfs" "$(ready_url "$service")" || {
       echo "$service is not ready"
       return 1
@@ -561,6 +575,7 @@ receipt() {
 # org preferences whole, and nothing else sets them. The password goes from
 # its file to curl's config on stdin, so it is on no command line.
 home_cmd() {
+  # shellcheck disable=SC2312 # q only quotes
   echo "$docker exec $1 cat /run/o11y/grafana_admin_password | sed $(q 's/^/user = "admin:/; s/$/"/') | $docker exec -i $2 curl -s -o /dev/null -w $(q '%{http_code}') -m 10 -K - -X PUT -H $(q 'Content-Type: application/json') -d $(q '{"homeDashboardUID":"o11y-stack-health"}') http://grafana:3000/api/org/preferences"
 }
 
@@ -568,6 +583,7 @@ home_cmd() {
 # logins can lock the admin account for a while.
 set_home() {
   local grafana rustfs code
+  # shellcheck disable=SC2312 # the command builders only echo
   grafana=$(container_of "$1" grafana) && rustfs=$(container_of "$1" rustfs) &&
     code=$(remote "$(home_cmd "$grafana" "$rustfs")" 2>>"$diagnostics_log") && [[ $code == 200 ]]
 }
@@ -595,6 +611,7 @@ data_cmd() {
 }
 
 up_cmd() {
+  # shellcheck disable=SC2312 # the command builders only echo
   echo "$(compose_cmd o11y "$dir/releases/$1" .env compose.yaml) up -d --remove-orphans"
 }
 
@@ -645,6 +662,7 @@ disk_gate() {
 
 # --- tasks ----------------------------------------------------------------
 
+# shellcheck disable=SC2312 # the command builders only echo
 preflight() {
   local failed=0 version
   # fact <required|noted> <label> <summary> <remote command>: the raw output
@@ -681,6 +699,7 @@ preflight() {
   disk_gate
 }
 
+# shellcheck disable=SC2312 # deploy-plan only prints the commands
 deploy_plan() {
   local out=tmp/deploy/plan id config
   id=$(new_release_id)
@@ -730,13 +749,17 @@ deploy() {
   local id current
   disk_gate
   id=$(staged)
+  # shellcheck disable=SC2312 # the command builders only echo
   if [[ -z $id ]] || ! quiet remote "$(verify_cmd "$dir/releases/$id")"; then
     stage
     id=$(<tmp/deploy/staged)
   fi
   current=$(promoted current)
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(attempt_cmd "$id")" || die "$task: the attempt could not be recorded"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
+  # shellcheck disable=SC2312 # the command builders only echo
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
@@ -772,10 +795,12 @@ rollback() {
   id=$(promoted "$pointer")
   [[ -n $id ]] || die "$task: there is no $pointer release on the host"
   [[ $pointer == current ]] || current=$(promoted current)
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(up_cmd "$id")" || die "$task: up from release $id failed; see $diagnostics_log"
   health_gate o11y || die "$task: release $id did not pass the health gate"
   if [[ $pointer == previous ]]; then
     swap_pending="$id $current"
+    # shellcheck disable=SC2312 # the command builders only echo
     quiet remote "$(swap_cmd "$id" "$current")" || die "$task: release $id is running, but the pointer swap failed"
     swap_pending=
     ok "$task: release $id is running, passed the health gate and is current again; previous names release ${current:-none}"
@@ -787,6 +812,7 @@ rollback() {
 down() {
   local id
   id=$(active)
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env.validate compose.yaml) down" ||
     die "$task: down failed; see $diagnostics_log"
   ok "$task: the containers of release $id are removed. Data, secrets, config and images are untouched"
@@ -804,6 +830,7 @@ status() {
     sed -E 's#^([^ ]+) [^ ]+ [^ ]*/releases/([^/ ]+)/[^ ]* #\1 (release \2) #' <<<"$listing"
     rustfs=$(awk '$1 == "rustfs" { print $2; exit }' <<<"$listing")
     for service in "${services[@]}"; do
+      # shellcheck disable=SC2312 # the command builders only echo
       if [[ -n $rustfs ]] && is_ready "$rustfs" "$(ready_url "$service")"; then
         echo "$service ready"
       else
@@ -812,6 +839,7 @@ status() {
     done
     # With no running container, a bare `docker stats` would list every
     # other container on the host.
+    # shellcheck disable=SC2312 # the command builders only echo
     remote "ids=\$($docker ps -q $(of_project o11y)) || exit 1; if [ -n \"\$ids\" ]; then $docker stats --no-stream --format $(q 'table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}') \$ids; else echo 'no running containers to measure'; fi" ||
       echo "container statistics are unavailable"
   fi
@@ -831,10 +859,12 @@ logs() {
   *) die "$task: unknown service" ;;
   esac
   id=$(active)
+  # shellcheck disable=SC2312 # the command builders only echo
   remote "$(compose_cmd o11y "$dir/releases/$id" .env.validate compose.yaml) logs --no-color --tail=200 $service"
 }
 
 grafana_password() {
+  # shellcheck disable=SC2312 # the command builders only echo
   remote "$docker exec \$($docker ps -q $(of_project o11y) --filter label=com.docker.compose.service=grafana) cat /run/o11y/grafana_admin_password"
 }
 
@@ -892,6 +922,7 @@ smoke_remote() {
     load_model
     address=$(resolve "$name") || true
     [[ $address =~ ^[0-9]+(\.[0-9]+){3}$ ]] || die "$task: the OTLP service name does not resolve on this machine"
+    # shellcheck disable=SC2312 # image_of reads the model load_model checked
     tools/receipt.sh --grpc -- docker run --rm --add-host "$name:$address" "$(image_of telemetrygen)" \
       traces --otlp-endpoint "$name:4317" 9>&-
     ;;
@@ -899,7 +930,7 @@ smoke_remote() {
   esac
   # What an anonymous user gets as home; see home_cmd. The assignment keeps
   # the pipeline's status, so a curl or jq that fails after printing fails.
-  home=$(curl -sS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -er '.redirectUri') ||
+  home=$(curl -fsS -m 15 "$O11Y_CHECK_GRAFANA_URL/api/dashboards/home" | jq -er '.redirectUri') ||
     die "$task: the anonymous home could not be read"
   [[ $home == /d/o11y-stack-health/* ]] || die "$task: the anonymous home is not the Stack health dashboard"
   ok "$task: the anonymous home is the Stack health dashboard"
@@ -931,7 +962,7 @@ telemetrygen /telemetrygen --help
 s3probe /usr/local/bin/aws --version"
 
 gate_test() {
-  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code
+  local id out release data=$dir/gate/data main tools facts service binary flag rustfs status code layout
   disk_gate
   read_host_name
   id=$(new_release_id)
@@ -939,6 +970,7 @@ gate_test() {
   release=$dir/gate/releases/$id
   render_release "$out" o11y-gate "$data" http://127.0.0.1:13000/ 13000 14317 14318
   load_model "$out/release"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(prepare_cmd "$dir/gate/releases")" || die "$task: the gate directories could not be prepared on the host"
   upload_configs "$out"
   upload "$out/release" "$dir/gate/releases" "$id"
@@ -948,6 +980,7 @@ gate_test() {
   # From here on the project is stopped on the way out, pass or fail. The
   # first stop clears what a killed run left behind.
   gate_release=$release
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(gate_down_cmd "$release")" ||
     die "$task: a leftover o11y-gate project could not be stopped"
   # Exit 1 means the data exists; anything else, such as SSH's 255, means
@@ -960,10 +993,12 @@ gate_test() {
   *) die "$task: the host could not be asked whether gate data exists" ;;
   esac
 
+  # shellcheck disable=SC2312 # the command builders only echo
   facts=$(remote "uname -r; $(fs_type_cmd)" | redact | tr '\n' ' ') || facts=unknown
   echo "note $task: kernel and filesystem under O11Y_REMOTE_DIR: $facts"
 
   while read -r service binary flag; do
+    # shellcheck disable=SC2312 # image_of reads the model load_model checked
     quiet remote "$docker run --rm --network none --entrypoint $binary $(image_of "$service") $flag" ||
       die "$task: the $service image's own binary does not run on this host; see $diagnostics_log"
   done <<<"$gate_binaries"
@@ -973,6 +1008,7 @@ gate_test() {
   # first mounts it. See data_cmd.
   quiet remote "mkdir -m 755 $data" || die "$task: the gate data directory could not be created"
   if ! tools/rustfs-probe.sh --release "$release" --project o11y-gate -- bash tools/nas.sh remote-compose </dev/null 9>&-; then
+    # shellcheck disable=SC2312 # the command builders only echo
     if remote "$(compose_cmd o11y-gate "$release" .env.validate compose.yaml) logs --no-color --no-log-prefix rustfs" 2>&1 |
       grep -qi 'unsupported filesystem'; then
       die "$task: RustFS refused to start on the filesystem under the gate data directory ($facts). This is its unsupported-filesystem guard, not a fault in the probe"
@@ -999,7 +1035,9 @@ gate_test() {
   poll "$timeout" self_scraped || die "$task: up is not 1 for exactly the five o11y/* jobs, each with the cluster and namespace labels"
   ok "$task: up is 1 for exactly the five o11y/* jobs, each labelled"
 
-  [[ $(remote "$(util_cmd "$data" "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*")") == "$gate_layout" ]] ||
+  # shellcheck disable=SC2312 # the command builders only echo
+  layout=$(remote "$(util_cmd "$data" "cd /d && stat -c '%n %u:%g %a' * && stat -c '%n %u:%g %a %s' secrets/*")") &&
+    [[ $layout == "$gate_layout" ]] ||
     die "$task: owners, modes or sizes under the gate data directory differ from the layout"
   ok "$task: the data directories and the four secret files have the expected owners, modes and sizes"
 
@@ -1024,6 +1062,7 @@ gate_test() {
   # Tempo cuts a block every 30 seconds by default and has no flush endpoint.
   poll 240 has_objects tempo || die "$task: the tempo bucket is still empty"
   quiet remote "$main rm -sf loki" || die "$task: loki could not be removed"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(util_cmd "$data/loki" 'rm -rf /d/* /d/.[!.]*')" || die "$task: the local state of loki could not be emptied"
   quiet remote "$main up -d loki" || die "$task: loki could not be created again"
   all_ready o11y-gate >>"$diagnostics_log" || die "$task: the stack did not come back after loki was recreated"
@@ -1037,10 +1076,12 @@ gate_test() {
 
   # What a daemon or host restart does: everything stopped, then started at
   # once with dependents first, with no `up` to order it.
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "ids=\$(for s in grafana alloy tempo mimir loki rustfs; do $docker ps -q $(of_project o11y-gate) --filter label=com.docker.compose.service=\$s; done) && $docker stop \$ids && $docker start \$ids" ||
     die "$task: the containers could not be stopped and started"
   health_gate o11y-gate || die "$task: the stack did not recover from a restart without up"
   ok "$task: the stack recovers from a stop and start of every container and passes the receipt check again"
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(gate_down_cmd "$release")" || die "$task: the rehearsal passed, but the o11y-gate project could not be stopped"
   gate_release=
   ok "$task: the rehearsal passed and the o11y-gate project is stopped. Its data stays until gate-clean"
@@ -1048,6 +1089,7 @@ gate_test() {
 
 gate_clean() {
   local existing status=0
+  # shellcheck disable=SC2312 # the command builders only echo
   existing=$(remote "$docker ps -aq $(of_project o11y-gate)") ||
     die "$task: the host could not be asked for o11y-gate containers; nothing was removed"
   [[ -z $existing ]] || die "$task: an o11y-gate container still exists; nothing was removed"
@@ -1058,6 +1100,7 @@ gate_clean() {
   *) die "$task: the host could not be asked for the gate directory; nothing was removed" ;;
   esac
   load_model
+  # shellcheck disable=SC2312 # the command builders only echo
   quiet remote "$(util_cmd "$dir/gate" 'find /d -mindepth 1 -maxdepth 1 -exec rm -rf {} +')" ||
     die "$task: the gate directory could not be emptied; see $diagnostics_log"
   quiet remote "rmdir $dir/gate" || die "$task: the emptied gate directory could not be removed; see $diagnostics_log"
@@ -1079,6 +1122,7 @@ remote-compose)
   # command. Gate project only.
   need host compose
   [[ ${1:-} == -p && ${2:-} == o11y-gate ]] || die "$task: only the o11y-gate project"
+  # shellcheck disable=SC2312 # the command builders only echo
   remote_stdin "sudo -n $O11Y_REMOTE_COMPOSE $(q "$@")"
   exit
   ;;
