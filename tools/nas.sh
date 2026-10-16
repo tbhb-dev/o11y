@@ -702,14 +702,16 @@ preflight() {
 
 # logs-facts: tools/logs-facts.sh on the host, as the script of bash -c,
 # given the docker path and the pinned Alloy image. It changes nothing on
-# the stack, and it checks and shape-allowlists its own output.
+# the stack, and it checks and shape-allowlists its own output. The shell
+# starts clean: env -i keeps only the login PATH, so no exported function
+# or BASH_ENV reaches it, and bash reads no startup file.
 logs_facts() {
   local script image
   load_model
   image=$(image_of alloy) || die "$task: the Compose model names no Alloy image"
   script=$(<tools/logs-facts.sh)
   # shellcheck disable=SC2312 # q only quotes
-  remote "bash -c $(q "$script") logs-facts $(q "$O11Y_REMOTE_DOCKER" "$image")" ||
+  remote "/usr/bin/env -i PATH=\"\$PATH\" bash --noprofile --norc -c $(q "$script") logs-facts $(q "$O11Y_REMOTE_DOCKER" "$image")" ||
     die "$task: a check did not hold, or the host could not be asked; the line above names the check"
   ok "$task: every check passed"
 }

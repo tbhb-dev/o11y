@@ -8,7 +8,7 @@
 # request. Every run asserts that no private value reached the output: the
 # test directory holds the data root, and every private value the stubs
 # print contains the word private.
-# cspell:ignore hostconfig logconfig mountinfo relatime rprivate statx submount tmpfs versinfo
+# cspell:ignore compgen drwx hostconfig logconfig mountinfo noprofile norc relatime rprivate statx submount tmpfs versinfo
 
 setup() {
   dir=$(cd "$(mktemp -d)" && pwd -P)
@@ -19,6 +19,7 @@ setup() {
   for tool in awk bash cat cut df grep head ln ls mv paste printf rm sed sort stat tr uniq; do
     ln -s "$(command -v "$tool")" "$dir/sys/$tool"
   done
+  ln -s "$(command -v sleep)" "$dir/sys/real-sleep"
 
   # The host's mount table: the data root lies under the test directory's
   # mount, and nothing is mounted below it.
@@ -48,7 +49,11 @@ EOF
   done
   printf '%s o11y-gate json-file\n' "$(cid b1)" >>"$dir/all"
   printf '%s private-app json-file\n' "$(cid c1)" >>"$dir/all"
-  printf 'tcp 0 0 0.0.0.0:5000 0.0.0.0:* LISTEN\ntcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN\ntcp6 0 0 :::22 :::* LISTEN\n' >"$dir/netstat"
+  {
+    echo "Active Internet connections (only servers)"
+    echo "Proto Recv-Q Send-Q Local Address Foreign Address State"
+    printf 'tcp 0 0 0.0.0.0:5000 0.0.0.0:* LISTEN\ntcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN\ntcp6 0 0 :::22 :::* LISTEN\n'
+  } >"$dir/netstat"
 
   stub "$dir/bin/sudo" <<'STUB'
 printf '%s %s\n' "$1" "$2" >>"$STUB/sudo.log"
@@ -76,10 +81,11 @@ info)
   ;;
 image) [ -z "${STUB_NO_IMAGE:-}" ] ;;
 ps)
+  # The project's containers, each running unless its line names a state.
   if [ "$2" = -aq ]; then
     cut -c 1-12 "$STUB/all"
   else
-    cat "$STUB/services"
+    awk 'NF == 2 { $3 = "running" } { print }' "$STUB/services"
   fi
   ;;
 inspect)
@@ -193,10 +199,21 @@ stub() {
   chmod +x "$1"
 }
 
+# clean <command...>: the command in an environment like the one nas.sh
+# gives the script, env -i with PATH, plus the stubs' STUB_* settings.
+# bats itself exports functions, which the script would refuse.
+clean() {
+  local name settings=()
+  for name in $(compgen -v STUB); do
+    settings+=("$name=${!name}")
+  done
+  env -i PATH="$dir/bin:$dir/sys" "${settings[@]}" "$@"
+}
+
 # facts: runs the script on the fake host, keeps its output and status,
 # and fails when a private value reached the output.
 facts() {
-  run env PATH="$dir/bin:$dir/sys" "${HOST_BASH:-$real_bash}" "$dir/logs-facts.sh" "$dir/host/docker" "$image"
+  run clean "${HOST_BASH:-$real_bash}" "$dir/logs-facts.sh" "$dir/host/docker" "$image"
   if [[ $output == *"$dir"* || $output == *private* ]]; then
     echo "a private value reached the output: $output"
     return 1
@@ -251,6 +268,62 @@ failed() {
   [[ $output != *FAIL* ]]
 }
 
+@test "a function inherited from the environment stops the run before anything is asked" {
+  run clean 'BASH_FUNC_declare%%=() { echo private; }' "$real_bash" "$dir/logs-facts.sh" "$dir/host/docker" "$image"
+  [ "$status" -eq 1 ]
+  [[ $output == "FAIL env: the shell inherited functions from its environment" ]]
+  [ ! -e "$dir/sudo.log" ]
+}
+
+# each_bash <test body function>: runs it under this bash and, where there
+# is one, under macOS's bash 3.2.
+each_bash() {
+  HOST_BASH=$real_bash "$1"
+  if [[ -x /bin/bash ]] && [[ $(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"') == 3 ]]; then
+    HOST_BASH=/bin/bash "$1"
+  fi
+}
+
+unbound_after_trap() {
+  sed -i 's/^trap finish EXIT$/&\n: "$no_such_variable"/' "$dir/logs-facts.sh"
+  [ "$(grep -c '^: "$no_such_variable"$' "$dir/logs-facts.sh")" -eq 1 ]
+  facts
+  failed "FAIL run: the script stopped on an unexpected error"
+  sed -i '/^: "$no_such_variable"$/d' "$dir/logs-facts.sh"
+}
+
+@test "an unbound variable after the trap fails with FAIL run, on bash 3.2 too" {
+  each_bash unbound_after_trap
+}
+
+terminated() {
+  local pid
+  rm -f "$dir/sleeping"
+  # Started without the clean wrapper's function in between, so the
+  # signal reaches the script's own shell.
+  local name settings=(STUB_ON_SLEEP=": >'$dir/sleeping'; '$dir/sys/real-sleep' 2")
+  for name in $(compgen -v STUB); do
+    settings+=("$name=${!name}")
+  done
+  env -i PATH="$dir/bin:$dir/sys" "${settings[@]}" "$HOST_BASH" "$dir/logs-facts.sh" "$dir/host/docker" "$image" >"$dir/out" 2>&1 &
+  pid=$!
+  for _ in $(seq 1 100); do
+    [ ! -e "$dir/sleeping" ] || break
+    "$dir/sys/real-sleep" 0.2
+  done
+  [ -e "$dir/sleeping" ]
+  kill -TERM "$pid"
+  status=0
+  wait "$pid" || status=$?
+  output=$(cat "$dir/out")
+  [[ $output != *"$dir"* && $output != *private* ]]
+  failed "FAIL run: the run was stopped by a signal"
+}
+
+@test "SIGTERM during the run fails with FAIL run, on bash 3.2 too" {
+  each_bash terminated
+}
+
 @test "docker is reached only through sudo -n and the docker path" {
   facts
   [ "$status" -eq 0 ]
@@ -263,7 +336,7 @@ failed() {
   [ "$status" -eq 0 ]
   runs=$(grep -c '^run ' "$dir/docker.log")
   [ "$runs" -eq 4 ]
-  expected="run --rm -i --pull never --network none --log-driver none --user 0:0 --cap-drop ALL --security-opt no-new-privileges:true --read-only --mount type=bind,source=$data/containers,target=/var/log/docker-containers,readonly,bind-propagation=rprivate --entrypoint /bin/bash $image -c set -euo pipefail; target=/var/log/docker-containers; "
+  expected="run --rm -i --pull never --network none --log-driver none --user 0:0 --cap-drop ALL --security-opt no-new-privileges:true --read-only --mount type=bind,source=$data/containers,target=/var/log/docker-containers,readonly,bind-propagation=rprivate --entrypoint /usr/bin/env $image -i PATH=/usr/sbin:/usr/bin:/sbin:/bin /bin/bash --noprofile --norc -c set -euo pipefail; target=/var/log/docker-containers; "
   [ "$(grep -cF -- "$expected" "$dir/docker.log")" -eq "$runs" ]
   # Before the script: the script's own awk takes -v.
   sed 's/ -c set -euo pipefail; .*//' "$dir/docker.log" >"$dir/docker-options.log"
@@ -280,7 +353,7 @@ failed() {
 }
 
 @test "a wrong argument count stops the run before anything is asked" {
-  run env PATH="$dir/bin:$dir/sys" bash "$dir/logs-facts.sh" "$dir/host/docker"
+  run clean "$real_bash" "$dir/logs-facts.sh" "$dir/host/docker"
   [ "$status" -eq 1 ]
   [[ $output == "FAIL args: it takes the docker path and the Alloy image" ]]
   [ ! -e "$dir/sudo.log" ]
@@ -383,6 +456,25 @@ failed() {
   failed "FAIL R3: a service's log was not globbed or not readable"
 }
 
+@test "an empty ls answer stops at R4 rather than reading as no ACL" {
+  stub "$dir/bin/ls" <<<':'
+  facts
+  failed "FAIL R4: ls printed an unexpected mode word"
+}
+
+@test "an ACL mark on the target reads as yes" {
+  stub "$dir/bin/ls" <<<'echo "drwx--x---+ 3 root root 4096 Oct 16 00:00 x"'
+  facts
+  [ "$status" -eq 0 ]
+  [[ $output == *"R4 acl-on-target yes"* ]]
+}
+
+@test "a malformed mount table line stops at R1" {
+  echo "private" >>"$dir/host-mountinfo"
+  facts
+  failed "FAIL R1: the mount table could not be read, or holds no enclosing mount"
+}
+
 @test "a failed stat on config.v2.json inside the reader stops at R4" {
   STUB_STAT_FAIL_ON='*config.v2.json' facts
   failed "FAIL R4: the reader failed"
@@ -449,6 +541,22 @@ failed() {
   failed "FAIL A4: a rotated log is smaller than before it rotated"
 }
 
+@test "loki dropping out during A4's window stops at A4" {
+  STUB_ON_SLEEP="grep -v '^loki ' '$dir/services' >'$dir/services.new' && mv '$dir/services.new' '$dir/services'" facts
+  failed "FAIL A4: the services changed during the window"
+}
+
+@test "a container recreated during A4's window stops at A4" {
+  STUB_ON_SLEEP="sed -i 's/^loki .*/loki $(cid f3)/' '$dir/services'" facts
+  failed "FAIL A4: the services changed during the window"
+}
+
+@test "a container that is not running stops at R3" {
+  sed -i 's/^\(loki .*\)$/\1 restarting/' "$dir/services"
+  facts
+  failed "FAIL R3: docker ps has an unexpected shape"
+}
+
 @test "a failed stat inside A4's snapshot stops at A4" {
   STUB_STAT_FAIL_ON='-c %i %s *' facts
   failed "FAIL A4: the reader failed"
@@ -463,7 +571,7 @@ failed() {
 
 @test "ss answers when netstat is missing" {
   rm "$dir/bin/netstat"
-  stub "$dir/bin/ss" <<<'printf "LISTEN 0 128 *:8080 *:*\nLISTEN 0 128 [::]:22 [::]:*\n"'
+  stub "$dir/bin/ss" <<<'printf "State Recv-Q Send-Q Local Address:Port Peer Address:Port\nLISTEN 0 128 *:8080 *:*\nLISTEN 0 128 [::]:22 [::]:*\n"'
   facts
   [ "$status" -eq 0 ]
   [[ $output == *"A5 tcp-ports-on-all-addresses 22 8080"* ]]
@@ -492,8 +600,23 @@ failed() {
   failed "FAIL A5: a port has an unexpected shape"
 }
 
+@test "netstat output without its header stops at A5 rather than reading as no listeners" {
+  echo "private output in no known shape" >"$dir/netstat"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+  : >"$dir/netstat"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+}
+
+@test "a netstat line that is not a listening TCP line stops at A5" {
+  echo "udp 0 0 0.0.0.0:53 0.0.0.0:* private" >>"$dir/netstat"
+  facts
+  failed "FAIL A5: the listener table has an unexpected shape"
+}
+
 @test "no listener on all addresses prints none" {
-  echo "tcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN" >"$dir/netstat"
+  printf 'Proto Recv-Q Send-Q Local Address Foreign Address State\ntcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN\n' >"$dir/netstat"
   facts
   [ "$status" -eq 0 ]
   [[ $output == *"A5 tcp-ports-on-all-addresses none"* ]]
@@ -512,6 +635,6 @@ failed() {
 }
 
 @test "an awk that prints valid sizes and then fails stops at N7" {
-  STUB_AWK_FAIL_ON='NR == 2*' facts
+  STUB_AWK_FAIL_ON='*Filesystem*' facts
   failed "FAIL N7: the df output could not be read"
 }

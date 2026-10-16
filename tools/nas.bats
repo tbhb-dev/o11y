@@ -1073,22 +1073,26 @@ $t serve status" ]
   [[ $output == *"mv -T current.new current"*"exec <grafana container> cat /run/o11y/grafana_admin_password | sed "*" -X PUT "*"'{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"* ]] || false
 }
 
+# cspell:ignore noprofile norc
 # tools/logs-facts.bats covers the script itself; this covers how the task
 # sends it.
-@test "logs-facts sends its script to bash -c with the docker path and the pinned Alloy image, and fails with it" {
+@test "logs-facts sends its script to a clean bash -c with the docker path and the pinned Alloy image, and fails with it" {
   image=$(grep -o 'grafana/alloy:v[^ ]*' "$root/compose.yaml")
-  STUB_FAIL=DockerRootDir nas logs-facts
+  # env -i keeps only PATH, so the sudo stub no longer knows the docker
+  # path it admits and refuses it, as the real sudoers would refuse a call
+  # it doesn't list. That fails the first docker call.
+  nas logs-facts
   [ "$status" -ne 0 ]
   [[ $output == *"FAIL D0: docker info failed"* ]] || false
   [[ $output == *"FAIL logs-facts: a check did not hold"* ]] || false
-  [ "$(grep -c '^bash -c ' "$dir/ssh.log")" -eq 1 ]
+  [ "$(grep -cF '/usr/bin/env -i PATH="$PATH" bash --noprofile --norc -c ' "$dir/ssh.log")" -eq 1 ]
   [[ $(tail -n 1 "$dir/ssh.log") == *"' logs-facts $O11Y_REMOTE_DOCKER $image" ]] || false
   [ ! -e "$remote" ]
 }
 
 @test "logs-facts needs only the host and the docker path" {
-  O11Y_REMOTE_DIR= O11Y_REMOTE_COMPOSE= O11Y_REMOTE_TAILSCALE= STUB_FAIL=DockerRootDir nas logs-facts
-  [[ $output == *"FAIL D0: docker info failed"* ]] || false
+  O11Y_REMOTE_DIR= O11Y_REMOTE_COMPOSE= O11Y_REMOTE_TAILSCALE= nas logs-facts
+  [[ $output == *"FAIL D0:"* ]] || false
   O11Y_REMOTE_DOCKER=relative/docker nas logs-facts
   [ "$status" -ne 0 ]
   [[ $output == *"O11Y_REMOTE_DOCKER must be an absolute path"* ]] || false
