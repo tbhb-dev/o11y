@@ -15,6 +15,7 @@ setup() {
 }
 
 teardown() {
+  [[ ! -f $dir/sockets.list ]] || xargs kill <"$dir/sockets.list" 2>/dev/null || true
   rm -rf "$dir"
 }
 
@@ -159,13 +160,38 @@ case "$1 $2" in
 esac
 STUB
   chmod +x "$dir/bin/docker"
-  export PATH="$dir/bin:$PATH" STUB_LOG=$dir/docker.log STUB_CONTEXT=default STUB_ENDPOINT=unix:///var/run/docker.sock
+  export PATH="$dir/bin:$PATH" STUB_LOG=$dir/docker.log STUB_CONTEXT=default
+  # The endpoint is a real socket on one of the daemon's own paths: under
+  # a throwaway HOME on macOS, the host's own daemon socket on Linux.
   if host_is_linux; then
     STUB_INFO="$(uname -n)|Ubuntu 24.04"
+    local path
+    for path in /var/run/docker.sock /run/docker.sock; do
+      [[ -S $path ]] || continue
+      STUB_ENDPOINT=unix://$path
+      break
+    done
+    [[ -n ${STUB_ENDPOINT:-} ]] || skip "needs a local daemon socket on Linux"
   else
     STUB_INFO="docker-desktop|Docker Desktop"
+    export HOME=$dir/home
+    mkdir -p "$HOME/.docker/run"
+    make_socket "$HOME/.docker/run/docker.sock"
+    STUB_ENDPOINT=unix://$HOME/.docker/run/docker.sock
   fi
-  export STUB_INFO
+  export STUB_INFO STUB_ENDPOINT
+}
+
+# make_socket <path>: a listening unix socket there, for as long as the
+# test runs.
+make_socket() {
+  python3 -c 'import socket, sys, time; s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(600)' "$1" &
+  echo $! >>"$dir/sockets.list"
+  local tries=0
+  until [[ -S $1 ]]; do
+    ((tries++ < 50)) || return 1
+    sleep 0.1
+  done
 }
 
 @test "the local engine guard drops an inherited remote endpoint before any call" {
@@ -208,4 +234,52 @@ STUB
     [[ $output == *"local engine:"* ]] || false
     [ ! -e "$dir/docker.log.work" ]
   done
+}
+
+@test "a socket that isn't the daemon's own, or a daemon path that isn't a socket, stops before any engine work" {
+  engine_stub
+  make_socket "$dir/forwarded.sock"
+  STUB_ENDPOINT=unix://$dir/forwarded.sock run local_engine_only
+  [ "$status" -ne 0 ]
+  [[ $output == *"does not use this machine's own daemon socket"* ]] || false
+  [[ $output != *forwarded* ]] || false
+  ! grep -q '|info ' "$dir/docker.log" || false
+  if ! host_is_linux; then
+    kill "$(cat "$dir/sockets.list" | head -n 1)" 2>/dev/null || true
+    rm -f "$HOME/.docker/run/docker.sock"
+    : >"$HOME/.docker/run/docker.sock"
+    run local_engine_only
+    [ "$status" -ne 0 ]
+    ! grep -q '|info ' "$dir/docker.log" || false
+  fi
+}
+
+@test "docker's own error output, with the context name and socket path, never reaches the task's output" {
+  engine_stub
+  cat >"$dir/bin/docker" <<'STUB'
+#!/bin/sh
+echo "context canary-ctx-name at canary-socket-path: connection refused" >&2
+case "$1 $2" in
+"context show") [ -n "${STUB_FAIL_SHOW:-}" ] && exit 1; echo default ;;
+"context inspect") [ -n "${STUB_FAIL_INSPECT:-}" ] && exit 1; echo "$STUB_ENDPOINT" ;;
+*) exit 1 ;;
+esac
+STUB
+  for failing in STUB_FAIL_SHOW STUB_FAIL_INSPECT STUB_FAIL_INFO; do
+    run env "$failing=1" bash -c "source '$BATS_TEST_DIRNAME/lib.sh'; local_engine_only"
+    [ "$status" -ne 0 ]
+    [[ $output == *"local engine:"* ]] || false
+    [[ $output != *canary* ]] || false
+  done
+}
+
+@test "the rehearsal's inside half, started directly, stops before any engine call" {
+  engine_stub
+  run bash "$BATS_TEST_DIRNAME/nas-rehearsal.sh" --inside
+  [ "$status" -ne 0 ]
+  [[ $output == *"--inside runs only in the container the rehearsal starts"* ]] || false
+  REHEARSAL_ENGINE="docker-desktop|Docker Desktop" DOCKER_HOST=tcp://nas.example.invalid:2376 \
+    run bash "$BATS_TEST_DIRNAME/nas-rehearsal.sh" --inside
+  [ "$status" -ne 0 ]
+  [ ! -e "$dir/docker.log" ]
 }

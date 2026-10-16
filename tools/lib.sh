@@ -37,34 +37,55 @@ host_is_linux() {
   [[ $(uname -s) == Linux ]]
 }
 
-# local_engine_only: the local test tasks drive this machine's own engine,
-# Docker Desktop's VM on macOS or the local daemon on Linux, and nothing
-# else. An inherited DOCKER_HOST or DOCKER_CONTEXT could point the CLI and
-# Compose at another engine, such as the deploy host's, so both are
-# dropped. The CLI's current context must then be default or desktop-linux
-# on a local socket, and the engine must name itself as this machine's.
+# local_engine_only [expected engine]: the local test tasks drive this
+# machine's own engine, Docker Desktop's VM on macOS or the local daemon on
+# Linux, and nothing else. The threat is misdirection: an inherited
+# DOCKER_HOST or DOCKER_CONTEXT, or a current context left pointing at the
+# deploy host's engine. A socket someone forwards on purpose to another
+# engine is out of scope. So both variables are dropped, the current
+# context must be default or desktop-linux, and its endpoint must be one of
+# the local daemon's own socket paths and an actual socket here. Last, as a
+# second layer, the engine must name itself as this machine's. Inside the
+# rehearsal's container, where the engine's socket is mounted and the
+# container's own name differs, the caller passes the name and system the
+# outside run already verified, and only that socket path is accepted.
 # Anything else stops the task before it sends the engine any work.
-# Messages never print the context or engine name, which can be private.
+# Docker's own error output is discarded, because it can hold the context
+# name and the socket path, and messages never print either.
+engine_identity=
 local_engine_only() {
-  local context endpoint info name os here
+  local expected=${1:-} context endpoint socket info name os here allowed=()
   unset DOCKER_HOST DOCKER_CONTEXT
-  context=$(docker context show) || die "local engine: the Docker context could not be read"
+  context=$(docker context show 2>/dev/null) || die "local engine: the Docker context could not be read"
   case $context in
   default | desktop-linux) ;;
   *) die "local engine: the current Docker context is neither default nor desktop-linux, so this task refuses to run" ;;
   esac
-  endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$context") ||
+  endpoint=$(docker context inspect --format '{{.Endpoints.docker.Host}}' "$context" 2>/dev/null) ||
     die "local engine: the Docker context could not be inspected"
-  [[ $endpoint == unix://* ]] || die "local engine: the Docker context does not use a local socket"
-  info=$(docker info --format '{{.Name}}|{{.OperatingSystem}}') || die "local engine: the engine did not answer"
+  if [[ -n $expected ]]; then
+    allowed=(/var/run/docker.sock)
+  elif host_is_linux; then
+    allowed=(/var/run/docker.sock /run/docker.sock)
+  else
+    allowed=("$HOME/.docker/run/docker.sock" /var/run/docker.sock)
+  fi
+  socket=${endpoint#unix://}
+  [[ $endpoint == unix://* && " ${allowed[*]} " == *" $socket "* && -S $socket ]] ||
+    die "local engine: the Docker context does not use this machine's own daemon socket"
+  info=$(docker info --format '{{.Name}}|{{.OperatingSystem}}' 2>/dev/null) || die "local engine: the engine did not answer"
   name=${info%%|*}
   os=${info#*|}
-  if host_is_linux; then
+  if [[ -n $expected ]]; then
+    [[ $info == "$expected" ]] || die "local engine: the engine is not the one the outside run verified"
+  elif host_is_linux; then
     here=$(uname -n) || die "local engine: this machine's name could not be read"
     [[ $name == "$here" ]] || die "local engine: the engine is not this machine's own"
   else
     [[ $name == docker-desktop && $os == "Docker Desktop" ]] || die "local engine: the engine is not this machine's Docker Desktop"
   fi
+  # shellcheck disable=SC2034 # the scripts that source this file read it
+  engine_identity=$info
 }
 
 # test_data_dir <name>: prints the data directory of a local test project.

@@ -63,7 +63,7 @@ if [[ ${1:-} != --inside ]]; then
   git archive "$base_commit" | tar -x -C "$base_dir"
   head_commit=$(git rev-parse --short HEAD)
   docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$scratch:$scratch" -v "$root:/src:ro" -v "$base_dir:/base:ro" \
-    -e "REHEARSAL_COMMIT=$head_commit" -e "REHEARSAL_BASE_COMMIT=$base_commit" "$cli_image" \
+    -e "REHEARSAL_COMMIT=$head_commit" -e "REHEARSAL_BASE_COMMIT=$base_commit" -e "REHEARSAL_ENGINE=$engine_identity" "$cli_image" \
     sh -c 'apk add --no-cache bash coreutils curl findutils jq tar >/dev/null && exec bash /src/tools/nas-rehearsal.sh --inside'
   [[ -z $(leftovers) ]] || die "the rehearsal left a container, network or volume behind"
   ok "rehearsal: nothing of projects o11y and o11y-gate is left on the engine"
@@ -71,6 +71,12 @@ if [[ ${1:-} != --inside ]]; then
 fi
 
 # --- inside the container -------------------------------------------------
+
+# Only the outside run starts this half, in its container, and hands it the
+# engine it verified. Run any other way, it stops before any engine call.
+[[ -f /.dockerenv && -n ${REHEARSAL_ENGINE:-} ]] ||
+  die "rehearsal: --inside runs only in the container the rehearsal starts"
+local_engine_only "$REHEARSAL_ENGINE"
 
 work=/work
 base_work=/base-work
