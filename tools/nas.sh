@@ -3,8 +3,8 @@
 #
 #   tools/nas.sh <task> [arguments]
 #
-# Read-only: preflight, deploy-plan (no SSH at all), status, logs [service],
-# serve-status, smoke-remote [--grpc], grafana-password.
+# Read-only: preflight, logs-facts, deploy-plan (no SSH at all), status,
+# logs [service], serve-status, smoke-remote [--grpc], grafana-password.
 # State-changing, each refused unless O11Y_CONFIRM=<task> is set: stage,
 # gate-test, gate-clean, deploy, rollback [--previous], down, serve-apply,
 # serve-clear.
@@ -24,7 +24,8 @@
 # - The generated secrets are never read, printed or copied. Compose loads
 #   the real env file only where a container needs it (init, up, run); every
 #   other call names .env.validate, which points at a dummy. `config` runs
-#   only locally, only on that dummy. Nothing runs `docker inspect`.
+#   only locally, only on that dummy. Nothing runs `docker inspect` but
+#   logs-facts, whose -f templates never name Config.Env.
 #   grafana-password is the one deliberate exception, and deploy's home
 #   dashboard call pipes the Grafana password into curl's config on the host,
 #   never onto a command line or off the host.
@@ -699,6 +700,20 @@ preflight() {
   disk_gate
 }
 
+# logs-facts: tools/logs-facts.sh on the host, as the script of bash -c,
+# given the docker path and the pinned Alloy image. It changes nothing on
+# the stack, and it checks and shape-allowlists its own output.
+logs_facts() {
+  local script image
+  load_model
+  image=$(image_of alloy) || die "$task: the Compose model names no Alloy image"
+  script=$(<tools/logs-facts.sh)
+  # shellcheck disable=SC2312 # q only quotes
+  remote "bash -c $(q "$script") logs-facts $(q "$O11Y_REMOTE_DOCKER" "$image")" ||
+    die "$task: a check did not hold, or the host could not be asked; the line above names the check"
+  ok "$task: every check passed"
+}
+
 # shellcheck disable=SC2312 # deploy-plan only prints the commands
 deploy_plan() {
   local out=tmp/deploy/plan id config
@@ -1131,7 +1146,7 @@ rollback)
   confirm
   ;;
 stage | gate-test | gate-clean | deploy | down | serve-apply | serve-clear) confirm ;;
-preflight | deploy-plan | status | logs | serve-status | smoke-remote | grafana-password) ;;
+preflight | logs-facts | deploy-plan | status | logs | serve-status | smoke-remote | grafana-password) ;;
 *)
   echo "usage: nas.sh <task> [arguments]; the tasks are listed at the top of this file" >&2
   exit 2
@@ -1182,6 +1197,7 @@ esac
 
 case $task in
 preflight) need host dir docker compose tailscale ports reserve ;;
+logs-facts) need host docker ;;
 deploy-plan) need dir docker compose domain ports ;;
 stage) need host dir docker compose domain ports ;;
 deploy) need host dir docker compose domain ports reserve ;;
@@ -1213,6 +1229,7 @@ esac
 
 case $task in
 preflight) preflight ;;
+logs-facts) logs_facts ;;
 deploy-plan) deploy_plan ;;
 stage) stage ;;
 gate-test) gate_test ;;

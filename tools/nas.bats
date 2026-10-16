@@ -15,7 +15,7 @@ setup() {
   remote=$host/o11y
   mkdir -p "$repo/tools" "$dir/bin" "$host/bin"
   cp -R "$root/compose.yaml" "$root/compose.init.yaml" "$root/compose.tools.yaml" "$root/config" "$repo/"
-  cp "$root/tools/nas.sh" "$root/tools/lib.sh" "$root/tools/render.sh" "$repo/tools/"
+  cp "$root/tools/nas.sh" "$root/tools/lib.sh" "$root/tools/render.sh" "$root/tools/logs-facts.sh" "$repo/tools/"
 
   # Runs the remote command locally. STUB_CORRUPT names an upload to damage
   # after it arrives, the way a broken transfer would. STUB_SSH_DOWN makes
@@ -1071,6 +1071,27 @@ $t serve status" ]
   [[ $output == *"compose.init.yaml run --rm -T init"* ]] || false
   [[ $output == *"compose.yaml up -d --remove-orphans"* ]] || false
   [[ $output == *"mv -T current.new current"*"exec <grafana container> cat /run/o11y/grafana_admin_password | sed "*" -X PUT "*"'{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"* ]] || false
+}
+
+# tools/logs-facts.bats covers the script itself; this covers how the task
+# sends it.
+@test "logs-facts sends its script to bash -c with the docker path and the pinned Alloy image, and fails with it" {
+  image=$(grep -o 'grafana/alloy:v[^ ]*' "$root/compose.yaml")
+  STUB_FAIL=DockerRootDir nas logs-facts
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL D0: docker info failed"* ]] || false
+  [[ $output == *"FAIL logs-facts: a check did not hold"* ]] || false
+  [ "$(grep -c '^bash -c ' "$dir/ssh.log")" -eq 1 ]
+  [[ $(tail -n 1 "$dir/ssh.log") == *"' logs-facts $O11Y_REMOTE_DOCKER $image" ]] || false
+  [ ! -e "$remote" ]
+}
+
+@test "logs-facts needs only the host and the docker path" {
+  O11Y_REMOTE_DIR= O11Y_REMOTE_COMPOSE= O11Y_REMOTE_TAILSCALE= STUB_FAIL=DockerRootDir nas logs-facts
+  [[ $output == *"FAIL D0: docker info failed"* ]] || false
+  O11Y_REMOTE_DOCKER=relative/docker nas logs-facts
+  [ "$status" -ne 0 ]
+  [[ $output == *"O11Y_REMOTE_DOCKER must be an absolute path"* ]] || false
 }
 
 @test "preflight changes nothing on the host" {
