@@ -12,25 +12,38 @@
 #
 #   tools/check-negated-status.sh [file...]   (default: tools/*.sh)
 #
-# It reads the syntax tree shfmt builds, not lines, so quoting, continued
-# lines and a pipeline split across lines don't hide a negation. A negated
-# statement fails when a command its status can come from is a quiet grep
-# or cmp: every stage of a pipeline, since under pipefail any stage decides
-# its status, either side of && or ||, and the last statement of a
-# subshell or braces. It reads the command name past a leading command,
-# builtin or exec, by name or by path, and past env: its short and long
-# options, the arguments of -u, -C and -S and of --unset, --chdir and
-# --split-string, a -- and NAME=value assignments, even when the value
-# holds an expansion. It skips the argument of grep's -e, -f, --regexp and
-# --file and of cmp's -i and -n before it takes -- as the end of options.
-# A file shfmt can't parse fails too. An allow comment covers only the
-# first such statement on the line below it.
+# What it handles, and nothing broader:
+#
+# - It reads the syntax tree shfmt builds, so quoting, continued lines and
+#   a pipeline split across lines don't hide a negation. A file shfmt
+#   can't parse fails.
+# - A statement negated with ! fails when its status can come from a quiet
+#   grep or cmp: any stage of a pipeline, either side of && or ||, and the
+#   last statement inside ( ) or { }.
+# - The command is grep, egrep, fgrep or cmp, named by a literal word or a
+#   literal path to one.
+# - Before the command it skips, by name or by path, a leading command or
+#   builtin and the words after it that start with -, a leading exec with
+#   its options and the name after -a, and a leading env with:
+#   the words that start with -; the word after -u, -C, -S, --unset,
+#   --chdir and --split-string; a --; and NAME=value words, with the name
+#   read from the literal text before any expansion, across unquoted,
+#   single-quoted and double-quoted parts.
+# - Quiet means a literal option word before -- that is a short cluster
+#   holding q (s for cmp), or --quiet, --silent or an unambiguous prefix of
+#   either. It skips the word after grep's -e, -f, --regexp and --file and
+#   after cmp's -i, -n, --ignore-initial and --bytes, also when the option
+#   ends a short cluster.
+# - A "# lint-negated: allow <reason>" comment on the line right above a
+#   statement covers only the first flagged statement on that line.
 #
 # Out of scope, so a negation behind them passes: other wrappers such as
-# sudo, timeout and xargs, env options not named above, a wrapper or command
-# name that is itself an expansion, a function that runs grep or cmp, eval,
-# sh -c, and commands inside a string that runs elsewhere, such as the
-# remote commands tools/nas.sh builds.
+# sudo, timeout and xargs; env options outside the list above, including
+# ones that take a separate argument; a wrapper, command name or quiet
+# option that is itself an expansion; a negated if, case, while, until or
+# for; a function that runs grep or cmp; eval and sh -c; and commands
+# inside a string that runs elsewhere, such as the remote commands
+# tools/nas.sh builds.
 # cspell:ignore chdir egrep fgrep endswith getopt subshell Subshell Stmts
 set -euo pipefail
 
@@ -50,10 +63,15 @@ negations() {
           (if all(.Parts[]?; .Type == "Lit") then ([.Parts[]?.Value] | join("")) else null end)
         else null end] |
       if any(. == null) then null else join("") end;
-    # The literal text a word starts with, up to its first expansion.
+    # The literal text a word starts with, up to its first expansion,
+    # through plain, single-quoted and double-quoted parts alike.
     def lead:
       reduce .Parts[] as $p ({text: "", open: true};
-        if .open and ($p.Type == "Lit" or $p.Type == "SglQuoted") then .text += $p.Value
+        if (.open | not) then .
+        elif $p.Type == "Lit" or $p.Type == "SglQuoted" then .text += $p.Value
+        elif $p.Type == "DblQuoted" then
+          reduce ($p.Parts // [])[] as $q (.;
+            if .open and $q.Type == "Lit" then .text += $q.Value else .open = false end)
         else .open = false end) | .text;
     # A wrapper word, by its name or a path to it.
     def named($n): . != null and (split("/") | last) == $n;

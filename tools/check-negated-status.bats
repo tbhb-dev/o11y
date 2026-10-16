@@ -191,3 +191,13 @@ script() {
   run bash "$check" "$dir/t.sh"
   [ "$status" -eq 0 ]
 }
+
+@test "an env assignment counts whether its first part is plain, single-quoted or double-quoted" {
+  local line
+  for line in '! env LC_ALL="$locale" grep -q x missing' "! env 'LC_ALL=C' grep -q x f" \
+    '! env "LC_ALL=$locale" grep -q x missing' '! env "LC_ALL"=C grep -q x f'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
