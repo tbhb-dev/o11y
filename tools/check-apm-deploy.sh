@@ -34,6 +34,7 @@ deployed() {
 
 if [[ ${1:-} == --record ]]; then
   deployed >"$recorded"
+  # shellcheck disable=SC2312 # the count is only reported
   echo "recorded $(wc -l <"$recorded") deployed files in $recorded"
   exit 0
 fi
@@ -87,6 +88,7 @@ for skill in "${skills[@]}"; do
 done
 
 if [[ $rc -eq 0 ]]; then
+  # shellcheck disable=SC2312 # the count is only reported
   echo "APM deploy matches the recorded frozen-consumer set ($(wc -l <"$recorded") files, ${#skills[@]} skills per harness)"
 fi
 exit "$rc"

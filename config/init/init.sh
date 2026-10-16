@@ -54,6 +54,7 @@ check_secret() {
 
 generate_secret() {
   case " $must_generate " in *" $1 "*) ;; *) return ;; esac
+  # shellcheck disable=SC2312 # valid checks the result on the next line
   printf '%s\n' "$(random "$2" "$3")" >"$secrets/.tmp.$1"
   valid "$secrets/.tmp.$1" "$2" "$3"
   mv "$secrets/.tmp.$1" "$secrets/$1"
@@ -79,8 +80,9 @@ generate_secret rustfs.access_key 'A-Z0-9' 20
 generate_secret rustfs.secret_key 'A-Za-z0-9' 40
 generate_secret grafana_admin_password 'A-Za-z0-9' 32
 
-printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' \
-  "$(cat "$secrets/rustfs.access_key")" "$(cat "$secrets/rustfs.secret_key")" >"$secrets/.tmp.s3.env"
+access_key=$(cat "$secrets/rustfs.access_key")
+secret_key=$(cat "$secrets/rustfs.secret_key")
+printf 'AWS_ACCESS_KEY_ID=%s\nAWS_SECRET_ACCESS_KEY=%s\n' "$access_key" "$secret_key" >"$secrets/.tmp.s3.env"
 chown "${O11Y_SECRETS_OWNER:-0:0}" "$secrets/.tmp.s3.env"
 chmod 0600 "$secrets/.tmp.s3.env"
 mv "$secrets/.tmp.s3.env" "$secrets/s3.env"

@@ -14,8 +14,11 @@ fail() {
   exit 1
 }
 
+# Two hashes that both failed would compare equal, so a failure stops the
+# probe.
 sha() {
-  sha256sum "$1" | cut -d' ' -f1
+  sum=$(sha256sum "$1") || fail "$1 could not be hashed"
+  echo "${sum%% *}"
 }
 
 # Puts a file of the given size and requires the same bytes back.
@@ -25,7 +28,9 @@ round_trip() {
   head -c "$size" /dev/urandom >"$work/$key"
   "$@" "$work/$key" "s3://$bucket/$key" >/dev/null
   aws s3api get-object --bucket "$bucket" --key "$key" "$work/$key.back" >/dev/null
-  [ "$(sha "$work/$key")" = "$(sha "$work/$key.back")" ] || fail "$key came back with different content"
+  sent=$(sha "$work/$key")
+  back=$(sha "$work/$key.back")
+  [ "$back" = "$sent" ] || fail "$key came back with different content"
   rm -f "$work/$key" "$work/$key.back"
 }
 
@@ -72,7 +77,9 @@ objects)
   etag=$(aws s3api head-object --bucket "$bucket" --key 100m --query ETag --output text)
   case $etag in *-*) ;; *) fail "the 100 MiB upload was not multipart" ;; esac
   aws s3api get-object --bucket "$bucket" --key 100m "$work/100m.back" >/dev/null
-  [ "$(sha "$work/100m")" = "$(sha "$work/100m.back")" ] || fail "100m came back with different content"
+  sent=$(sha "$work/100m")
+  back=$(sha "$work/100m.back")
+  [ "$back" = "$sent" ] || fail "100m came back with different content"
   rm -f "$work/100m" "$work/100m.back"
 
   # More keys than one listing page holds. A store that truncates the
@@ -96,7 +103,8 @@ objects)
   first=$(page 'length(Contents)')
   second=$(page 'length(Contents)' --continuation-token "$token")
   [ "$first" = 1000 ] && [ "$second" = 100 ] || fail "listed $first and then $second keys, not 1000 and 100"
-  [ "$(page NextContinuationToken --continuation-token "$token")" = None ] || fail "the last listing page is truncated"
+  last=$(page NextContinuationToken --continuation-token "$token")
+  [ "$last" = None ] || fail "the last listing page is truncated"
 
   aws s3 rm --only-show-errors --recursive "s3://$bucket/"
   list_keys "$bucket"
@@ -116,7 +124,8 @@ crash)
     head -c 4096 /dev/urandom >"$work/obj"
     if aws s3api put-object --bucket "$bucket" --key "crash/$i" --body "$work/obj" \
       --cli-connect-timeout 2 --cli-read-timeout 5 >/dev/null 2>&1; then
-      echo "$i $(sha "$work/obj")" >>"$acked"
+      sent=$(sha "$work/obj")
+      echo "$i $sent" >>"$acked"
       # The caller waits for this line before it kills the store.
       [ "$i" -ne 5 ] || echo "probe: writing"
     else
@@ -136,9 +145,11 @@ crash)
   while read -r n want; do
     aws s3api get-object --bucket "$bucket" --key "crash/$n" "$work/back" >/dev/null ||
       fail "acknowledged key crash/$n is unreadable"
-    [ "$(sha "$work/back")" = "$want" ] || fail "acknowledged key crash/$n has different content"
+    back=$(sha "$work/back")
+    [ "$back" = "$want" ] || fail "acknowledged key crash/$n has different content"
   done <"$acked"
   read_listed_keys
+  # shellcheck disable=SC2312 # the count is only reported
   echo "probe: $(wc -l <"$acked") acknowledged writes survived"
   ;;
 

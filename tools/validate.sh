@@ -62,14 +62,19 @@ image() {
   jq -er --arg s "$1" '.services[$s].image' <<<"$model"
 }
 
+# Read once, here, where a failed read stops the script, rather than inside
+# each docker run's arguments.
+config_lines=$(grep '^O11Y_CONFIG_' "$release/.env")
+
 config_dir() {
-  grep "^O11Y_CONFIG_$1=" "$release/.env" | cut -d= -f2-
+  sed -n "s/^O11Y_CONFIG_$1=//p" <<<"$config_lines"
 }
 
 # run_image <service> <config dir> <mount point> <args...>
 run_image() {
   local service=$1 dir=$2 mount=$3
   shift 3
+  # shellcheck disable=SC2312 # jq -e prints the image only when it succeeds, and a missing one fails docker run
   docker run --rm --network none \
     -e AWS_ACCESS_KEY_ID=validate -e AWS_SECRET_ACCESS_KEY=validate \
     -v "$dir:$mount:ro" -v "$root/tests/invalid:/invalid:ro" \
@@ -82,6 +87,7 @@ alloy_stability=$(jq -er '.services.alloy.command[] | select(startswith("--stabi
 
 # validator <component> valid|invalid: runs the component's own config check
 # on its real config or on its fixture under tests/invalid/.
+# shellcheck disable=SC2312 # config_dir only reads config_lines, read above with its status
 validator() {
   local real=/etc/$1/config.yaml fixture=/invalid/$1.yaml file
   if [[ $1 == alloy ]]; then
@@ -130,6 +136,7 @@ for component in loki tempo mimir alloy; do
   # the validator ran, so neither may pass for a rejection.
   status=0
   validator "$component" invalid || status=$?
+  # shellcheck disable=SC2312 # rejection only echoes
   if [[ $status -eq 0 ]]; then
     echo "FAIL $component: no coverage, the invalid fixture was accepted" >&2
     failed=1
@@ -169,7 +176,7 @@ below_ga() {
 # component. At the default level Alloy exits 1 and names every component
 # below it, and the one it names must be the one the level was lowered for.
 status=0
-# shellcheck disable=SC2312 # a missing config directory fails docker run, so the check fails
+# shellcheck disable=SC2312 # config_dir only reads config_lines, read above with its status
 run_image alloy "$(config_dir ALLOY)" /etc/alloy validate /etc/alloy/config.alloy || status=$?
 if [[ $status -eq 0 ]]; then
   echo "FAIL alloy: config.alloy passes at the default stability level, so $alloy_stability is not needed" >&2
@@ -192,6 +199,7 @@ fi
 
 # Formatting only: the invalid Alloy fixture is well formed, so this has no
 # reject case.
+# shellcheck disable=SC2312 # config_dir only reads config_lines, read above with its status
 if run_image alloy "$(config_dir ALLOY)" /etc/alloy fmt --test /etc/alloy/config.alloy; then
   ok "alloy: formatted"
 else
