@@ -117,21 +117,92 @@ otelcol.exporter.otlphttp "mimir" {
 	}
 }
 
-// Self-monitoring: scrape the stack's own /metrics into Mimir.
-prometheus.scrape "stack" {
-	targets = [
-		{"__address__" = "127.0.0.1:12345", "job" = "alloy"},
-		{"__address__" = "loki:3100", "job" = "loki"},
-		{"__address__" = "tempo:3200", "job" = "tempo"},
-		{"__address__" = "mimir:8080", "job" = "mimir"},
-		{"__address__" = "grafana:3000", "job" = "grafana"},
-	]
+// Self-monitoring: one scrape per service of the stack, so each gets its own
+// limits. A scrape over any of them fails whole and sets up to 0, so the job
+// reads as down rather than as healthy. Jobs follow the Mimir mixin's
+// <namespace>/<component> shape.
+// Each sample_limit is the most samples one scrape returned on a local
+// stack under telemetrygen at 50 items a second per signal (alloy 1282,
+// grafana 4676, loki 2185, mimir 3665, tempo 1051), at least doubled and
+// rounded up to the next thousand. Grafana and Mimir get at least three
+// times their peak, because their series grow with every dashboard and
+// client added, and going over drops the whole scrape and shows the job as
+// down. The Stack health dashboard shows each against its limit.
+prometheus.scrape "alloy" {
+	targets         = [{"__address__" = "alloy:12345", "job" = "o11y/alloy"}]
 	scrape_interval = "30s"
-	forward_to      = [prometheus.remote_write.mimir.receiver]
+	sample_limit    = 3000
+	label_limit     = 40
+	body_size_limit = "16MiB"
+	forward_to      = [prometheus.relabel.stack.receiver]
 }
 
+prometheus.scrape "loki" {
+	targets         = [{"__address__" = "loki:3100", "job" = "o11y/loki"}]
+	scrape_interval = "30s"
+	sample_limit    = 5000
+	label_limit     = 40
+	body_size_limit = "16MiB"
+	forward_to      = [prometheus.relabel.stack.receiver]
+}
+
+prometheus.scrape "tempo" {
+	targets         = [{"__address__" = "tempo:3200", "job" = "o11y/tempo"}]
+	scrape_interval = "30s"
+	sample_limit    = 3000
+	label_limit     = 40
+	body_size_limit = "16MiB"
+	forward_to      = [prometheus.relabel.stack.receiver]
+}
+
+prometheus.scrape "mimir" {
+	targets         = [{"__address__" = "mimir:8080", "job" = "o11y/mimir"}]
+	scrape_interval = "30s"
+	sample_limit    = 11000
+	label_limit     = 40
+	body_size_limit = "16MiB"
+	forward_to      = [prometheus.relabel.stack.receiver]
+}
+
+prometheus.scrape "grafana" {
+	targets         = [{"__address__" = "grafana:3000", "job" = "o11y/grafana"}]
+	scrape_interval = "30s"
+	sample_limit    = 15000
+	label_limit     = 40
+	body_size_limit = "16MiB"
+	forward_to      = [prometheus.relabel.stack.receiver]
+}
+
+// cluster comes from the release's O11Y_CLUSTER, o11y unless the owner names
+// a site.
+prometheus.relabel "stack" {
+	rule {
+		target_label = "cluster"
+		replacement  = sys.env("O11Y_CLUSTER")
+	}
+
+	rule {
+		target_label = "namespace"
+		replacement  = "o11y"
+	}
+	forward_to = [prometheus.remote_write.mimir.receiver]
+}
+
+// Bounded: at most 4 shards of 5000 queued samples, and a WAL that keeps a
+// series no longer than about 2.5 hours while Mimir is unreachable.
 prometheus.remote_write "mimir" {
 	endpoint {
 		url = "http://mimir:8080/api/v1/push"
+
+		queue_config {
+			capacity             = 5000
+			max_shards           = 4
+			max_samples_per_send = 2000
+		}
+	}
+
+	wal {
+		max_keepalive_time = "2h"
+		truncate_frequency = "30m"
 	}
 }

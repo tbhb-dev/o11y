@@ -181,6 +181,19 @@ exec)
     printf 204
     [ -z "${STUB_FLUSH_THEN_FAILS:-}" ] || exit 255
     ;;
+  *api/v1/query*)
+    # Mimir through Grafana: the five self-scrapes, up, unless
+    # STUB_SELF_DOWN leaves Tempo out.
+    jobs="alloy grafana loki mimir tempo"
+    [ -z "${STUB_SELF_DOWN:-}" ] || jobs="alloy grafana loki mimir"
+    printf '{"status":"success","data":{"result":['
+    sep=
+    for job in $jobs; do
+      printf '%s{"metric":{"job":"o11y/%s","cluster":"o11y","namespace":"o11y"},"value":[0,"1"]}' "$sep" "$job"
+      sep=,
+    done
+    printf ']}}'
+    ;;
   *curl*)
     printf '%s' "${STUB_HTTP:-200}"
     # STUB_HTTP_THEN_FAILS answers, then fails, as a dropped connection can.
@@ -324,18 +337,30 @@ STUB
 [ -z "${STUB_TAIL_FAILS:-}" ] || exit 1
 exec "$STUB_TAIL" "$@"
 STUB
+  # The free space under the deploy directory, in kilobytes, for df -Pk:
+  # STUB_DISK_FREE of STUB_DISK_TOTAL, 500 GiB of 1000 GiB unless a test
+  # says otherwise. Any other df call goes to the real one.
+  stub "$dir/bin/df" <<'STUB'
+if [ "$1" = -Pk ]; then
+  echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+  echo "/dev/fake ${STUB_DISK_TOTAL:-1048576000} 0 ${STUB_DISK_FREE:-524288000} 50% /"
+  exit 0
+fi
+exec "$STUB_DF" "$@"
+STUB
+  STUB_DF=$(command -v df)
   STUB_TAR=$(command -v tar)
   STUB_TAIL=$(command -v tail)
   STUB_SED=$(command -v sed)
   STUB_GREP=$(command -v grep)
   STUB_TR=$(command -v tr)
-  export STUB=$dir STUB_TAR STUB_TAIL STUB_SED STUB_GREP STUB_TR PATH="$dir/bin:$PATH"
+  export STUB=$dir STUB_DF STUB_TAR STUB_TAIL STUB_SED STUB_GREP STUB_TR PATH="$dir/bin:$PATH"
   export O11Y_COMPOSE=$dir/bin/compose O11Y_HEALTH_TIMEOUT=0
   export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
   export O11Y_REMOTE_TAILSCALE=$host/bin/tailscale O11Y_TAILNET_DOMAIN=example.ts.net
   export O11Y_NODE_ADDR=192.0.2.10 O11Y_PRIVATE_STRINGS=
-  unset O11Y_CONFIRM O11Y_GRAFANA_PORT O11Y_OTLP_GRPC_PORT O11Y_OTLP_HTTP_PORT O11Y_SECRETS_OWNER
+  unset O11Y_CONFIRM O11Y_DISK_RESERVE_GB O11Y_GRAFANA_PORT O11Y_OTLP_GRPC_PORT O11Y_OTLP_HTTP_PORT O11Y_SECRETS_OWNER
   changing=(stage gate-test gate-clean deploy rollback down serve-apply serve-clear)
   sentinel=NasSentinelSecretNotARealSecret000000000
 }
@@ -1065,7 +1090,9 @@ $t serve status" ]
 # mount table doesn't name it, and a stat that reads it from the filesystem
 # and records the path it was asked about.
 df_without_type() {
+  mv "$dir/bin/df" "$dir/bin/df.free"
   stub "$dir/bin/df" <<'STUB'
+[ "$1" != -Pk ] || exec "$STUB/bin/df.free" "$@"
 echo "Filesystem Type 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/fake - 1000 10 990 1% /"
 STUB
@@ -1099,7 +1126,8 @@ STUB
 @test "the filesystem is reported as unknown, not left empty, when neither df nor stat names it" {
   healthy o11y-gate
   layout
-  stub "$dir/bin/df" <<<'echo "df: invalid option -- T" >&2; exit 1'
+  mv "$dir/bin/df" "$dir/bin/df.free"
+  stub "$dir/bin/df" <<<'[ "$1" != -Pk ] || exec "$STUB/bin/df.free" "$@"; echo "df: invalid option -- T" >&2; exit 1'
   stub "$dir/bin/stat" <<<'exit 1'
   go gate-test
   [ "$status" -eq 0 ]
@@ -1837,4 +1865,109 @@ wait_for() {
   STUB_FLUSH_THEN_FAILS=1 O11Y_CONFIRM=gate-test nas gate-test
   [ "$status" -ne 0 ]
   [[ $output == *"Loki's flush endpoint failed"* ]] || false
+}
+
+# --- disk reserve ---------------------------------------------------------
+
+@test "deploy below the disk reserve starts nothing, frees the lock and says why" {
+  healthy o11y
+  STUB_DISK_FREE=$((10 * 1048576)) go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL deploy: the filesystem under O11Y_REMOTE_DIR has 10 GiB free of 1000 GiB (1 percent), below the reserve of 50 GiB and 10 percent"* ]] || false
+  recorded "mkdir $remote/.deploy.lock"
+  ! recorded "up -d" || false
+  ! recorded "tar -xpf" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "deploy refuses under 10 percent free even above the reserve" {
+  healthy o11y
+  STUB_DISK_FREE=$((90 * 1048576)) go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"has 90 GiB free of 1000 GiB (9 percent), below the reserve"* ]] || false
+  ! recorded "up -d" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "preflight and gate-test refuse below the reserve, and gate-test frees the lock" {
+  healthy o11y-gate
+  layout
+  O11Y_DISK_RESERVE_GB=600 nas preflight
+  [ "$status" -ne 0 ]
+  [[ $output == *"below the reserve of 600 GiB"* ]] || false
+  O11Y_DISK_RESERVE_GB=600 go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL gate-test: the filesystem under O11Y_REMOTE_DIR has 500 GiB free"* ]] || false
+  ! recorded "o11y-gate" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "above the reserve the gate passes and says so, and status prints the free space" {
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  [[ $output == *"ok deploy: the filesystem under O11Y_REMOTE_DIR has 500 GiB free of 1000 GiB (50 percent), above the reserve"* ]] || false
+  nas status
+  [[ $output == *"disk under O11Y_REMOTE_DIR: 500 GiB free of 1000 GiB (50 percent)"* ]] || false
+}
+
+@test "a host that can't report its free space fails the gate" {
+  healthy o11y
+  stub "$dir/bin/df" <<<'exit 1'
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be asked for its free space"* ]] || false
+  ! recorded "up -d" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "a reserve that is not a whole number of GiB is rejected by name before any ssh call" {
+  for value in 50G -1 1e3 08 007; do
+    O11Y_DISK_RESERVE_GB=$value go deploy
+    [ "$status" -ne 0 ]
+    [[ $output == *"O11Y_DISK_RESERVE_GB must be a whole number of GiB, with no leading zero"* ]] || false
+  done
+  [ ! -e "$dir/ssh.log" ]
+}
+
+@test "a reserve of 0 is a valid reserve, and 10 is read as ten, not as octal" {
+  healthy o11y
+  O11Y_DISK_RESERVE_GB=0 STUB_DISK_FREE=$((200 * 1048576)) go deploy
+  [ "$status" -eq 0 ]
+  rm "$repo/tmp/deploy/staged"
+  O11Y_DISK_RESERVE_GB=10 STUB_DISK_FREE=$((9 * 1048576)) STUB_DISK_TOTAL=$((50 * 1048576)) go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"below the reserve of 10 GiB"* ]] || false
+}
+
+@test "a df that prints the free space and then fails fails the gate" {
+  healthy o11y
+  stub "$dir/bin/df" <<'STUB'
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 1048576000 0 524288000 50% /"
+exit 1
+STUB
+  go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"could not be asked for its free space"* ]] || false
+  ! recorded "up -d" || false
+  [ ! -e "$remote/.deploy.lock" ]
+}
+
+@test "rollback below the reserve still runs, and checks no free space" {
+  two_deploys
+  STUB_DISK_FREE=1024 go rollback --previous
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$remote/current")" = "releases/$first" ]
+  ! recorded "df -Pk" || false
+}
+
+@test "gate-test fails when a self-scrape is not up, and still stops the project" {
+  healthy o11y-gate
+  layout
+  STUB_SELF_DOWN=1 go gate-test
+  [ "$status" -ne 0 ]
+  [[ $output == *"FAIL gate-test: up is not 1 for exactly the five o11y/* jobs"* ]] || false
+  recorded "-p o11y-gate --env-file"
+  [ "$(grep -c "down --remove-orphans" "$dir/ssh.log")" -ge 2 ]
 }

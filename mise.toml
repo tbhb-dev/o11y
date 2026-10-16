@@ -242,8 +242,8 @@ description = "Test the leak check against throwaway repositories"
 run = "bats tools/check-leaks.bats"
 
 [tasks.test-stack]
-description = "Test the release renderer, the S3 probe, validation's isolation, and the shared test helpers"
-run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe.bats tools/validate.bats"
+description = "Test the release renderer, the S3 probe, validation's isolation, the fault run's memory verdict, and the shared test helpers"
+run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe.bats tools/validate.bats tools/fault-run.bats"
 
 [tasks.test-nas]
 description = "Test the deploy host tasks against a fake host, with ssh, sudo and the host's binaries stubbed"
@@ -254,6 +254,12 @@ run = "bats tools/nas.bats"
 [tasks.nas-local-rehearsal]
 description = "Run the deploy host tasks end to end against the local Docker engine, with ssh, sudo and tailscale stubbed"
 run = "bash tools/nas-rehearsal.sh"
+
+# Local only, and run once before a host deploy rather than in CI: it boots
+# the stack under client load and stops Mimir for five minutes.
+[tasks.fault-run]
+description = "Stop Mimir for five minutes under client load and record receipts, restarts and raw cgroup memory"
+run = "bash tools/fault-run.sh"
 
 [tasks.test]
 description = "Run every test suite"

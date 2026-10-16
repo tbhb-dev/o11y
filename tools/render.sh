@@ -22,7 +22,7 @@ set -euo pipefail
 umask 077
 
 required=(O11Y_DATA_DIR O11Y_GRAFANA_ROOT_URL)
-optional=(O11Y_GRAFANA_PORT O11Y_OTLP_GRPC_PORT O11Y_OTLP_HTTP_PORT O11Y_SECRETS_OWNER)
+optional=(O11Y_GRAFANA_PORT O11Y_OTLP_GRPC_PORT O11Y_OTLP_HTTP_PORT O11Y_SECRETS_OWNER O11Y_CLUSTER)
 
 usage() {
   echo "usage: render.sh <outdir> [--config-root <absolute path>]" >&2

@@ -43,6 +43,7 @@ if [[ ${1:-} == --model ]]; then
   exit 0
 fi
 
+local_engine_only
 pin_docker_api
 
 for file in compose.yaml compose.init.yaml compose.tools.yaml; do
@@ -204,6 +205,37 @@ if run_image alloy "$(config_dir ALLOY)" /etc/alloy fmt --test /etc/alloy/config
   ok "alloy: formatted"
 else
   echo "FAIL alloy: config.alloy is not formatted" >&2
+  failed=1
+fi
+
+# bounded <config.alloy>: every scrape sets all three of its limits, and the
+# one remote write has a queue_config and a wal block.
+bounded() {
+  awk '
+    /^prometheus\.scrape "/ { scrape = 1; scrapes++; s = l = b = 0; next }
+    scrape && /^\tsample_limit / { s = 1 }
+    scrape && /^\tlabel_limit / { l = 1 }
+    scrape && /^\tbody_size_limit / { b = 1 }
+    scrape && /^}/ { scrape = 0; if (!(s && l && b)) bad = 1 }
+    /^prometheus\.remote_write "/ { write = 1; writes++ }
+    write && /^\t\tqueue_config \{/ { queue = 1 }
+    write && /^\twal \{/ { wal = 1 }
+    write && /^}/ { write = 0 }
+    END { exit !(scrapes > 0 && !bad && writes == 1 && queue && wal) }' "$1"
+}
+
+alloy_dir=$(config_dir ALLOY)
+if bounded "$alloy_dir/config.alloy"; then
+  ok "alloy: every scrape has its sample, label and body limits, and the remote write a queue and a WAL bound"
+else
+  echo "FAIL alloy: a scrape lacks a limit, or the remote write lacks queue_config or wal" >&2
+  failed=1
+fi
+
+if jq -e '.services.alloy | (.environment.GOMEMLIMIT | length > 0) and (.stop_grace_period | length > 0)' <<<"$model" >/dev/null; then
+  ok "alloy: the container sets GOMEMLIMIT and a stop grace period"
+else
+  echo "FAIL alloy: the container lacks GOMEMLIMIT or stop_grace_period" >&2
   failed=1
 fi
 

@@ -53,6 +53,9 @@ stub_docker() {
   cat >"$dir/bin/docker" <<'STUB'
 #!/usr/bin/env bash
 case "$1" in
+  # The local engine guard: a local context, socket and engine.
+  context) [[ $2 == show ]] && echo default || echo unix:///var/run/docker.sock ;;
+  info) if [[ $(uname -s) == Linux ]]; then echo "$(uname -n)|Ubuntu"; else echo "docker-desktop|Docker Desktop"; fi ;;
   version) echo 1.40 ;;
   run)
     if [[ "$*" == *" validate /etc/alloy/config.alloy"* ]]; then

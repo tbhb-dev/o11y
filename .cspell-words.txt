@@ -3,6 +3,7 @@ AGENTMSG
 Alloy
 COPYFILE
 ENOSYS
+GOMEMLIMIT
 GOPATH
 Grafana
 Loki
@@ -20,6 +21,8 @@ argjson
 autostash
 btrfs
 buildx
+cgroupfs
+cgroupns
 cksum
 deltatocumulative
 devtools
@@ -32,6 +35,7 @@ gobin
 healthcheck
 hostnames
 inmemory
+keepalive
 kvstore
 lockfiles
 memberlist
@@ -40,6 +44,7 @@ multitenancy
 objstore
 oneoff
 otel
+percentunit
 pipefail
 preapproval
 prek

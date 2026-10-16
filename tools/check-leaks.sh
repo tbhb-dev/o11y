@@ -134,6 +134,12 @@ else
   add_needle "O11Y_TAILNET_DOMAIN (first label)" "${O11Y_TAILNET_DOMAIN%%.*}"
 fi
 
+# The cluster label is a site name only when the owner sets one. Its
+# default, o11y, is this project's own name and appears everywhere.
+if [[ -n ${O11Y_CLUSTER-} && $O11Y_CLUSTER != o11y ]]; then
+  add_needle O11Y_CLUSTER "$O11Y_CLUSTER"
+fi
+
 # The list may be empty. An empty list is a valid choice, not a gap.
 IFS=',' read -r -a entries <<<"${O11Y_PRIVATE_STRINGS-}"
 index=0
