@@ -441,3 +441,62 @@ for sentinel in "$sentinel_access" "$sentinel_secret" "$sentinel_password"; do
     "this script's output=$out/transcript.log" || die "10: a sentinel secret leaked"
 done
 ok "10: no sentinel secret in the rendered output, container logs, process arguments or test output"
+
+# 11. Delta temporality. Claude Code and Codex send delta sums, which Mimir
+# rejects over OTLP and counts as otlp_parse_error; Alloy turns them into
+# cumulative ones. Two deltas, 3 then 4, must arrive as one series at 7, a
+# cumulative sum of 5 beside them must arrive as 5, and Mimir must have
+# discarded nothing. Its counter is read from Mimir itself, not from the
+# scraped copy, which lags by a scrape interval.
+discarded() {
+  main exec -T rustfs curl -sS --fail -m 10 http://mimir:8080/metrics | otlp_parse_discards
+}
+# sum_point <name> <temporality: 1 delta, 2 cumulative> <value> <start> <end>
+sum_point() {
+  printf '{"resourceMetrics":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"o11y-smoke-delta"}}]},"scopeMetrics":[{"scope":{"name":"o11y-smoke"},"metrics":[{"name":"%s","sum":{"aggregationTemporality":%s,"isMonotonic":true,"dataPoints":[{"asInt":"%s","startTimeUnixNano":"%s000000000","timeUnixNano":"%s000000000","attributes":[{"key":"run_id","value":{"stringValue":"%s"}}]}]}}]}]}]}' \
+    "$1" "$2" "$3" "$4" "$5" "$delta_run"
+}
+send_point() {
+  sum_point "$@" | expect_status 200 -H 'Content-Type: application/json' --data-binary @- "$O11Y_CHECK_OTLP_URL/v1/metrics"
+}
+# The value of the run's one series of that name, or "none". A query that
+# fails fails this too.
+mimir_value() {
+  curl -sS --fail -m 15 "$grafana/api/datasources/proxy/uid/mimir/api/v1/query" \
+    --data-urlencode "query=$1{run_id=\"$delta_run\"}" | jq -er '.data.result | if length == 1 then .[0].value[1] else "none" end'
+}
+# Each poll keeps what it saw, for the failure message.
+seen_delta=unread seen_cumulative=unread
+arrived() {
+  seen_delta=$(mimir_value o11y_smoke_delta_total) || return 1
+  seen_cumulative=$(mimir_value o11y_smoke_cumulative_total) || return 1
+  [[ $seen_delta == 7 && $seen_cumulative == 5 ]]
+}
+# Groups 3 and 5 already show this Alloy starting and ingesting; this shows
+# it does so at the stability level the processor needs.
+alloy_id=$(main ps -q alloy) || die "11: the Alloy container could not be found"
+alloy_args=$(docker inspect -f '{{json .Args}}' "$alloy_id") || die "11: the Alloy container could not be inspected"
+[[ $alloy_args == *'"--stability.level=experimental"'* ]] || die "11: Alloy runs without --stability.level=experimental"
+delta_run=$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+before=$(discarded) || die "11: Mimir's discarded samples could not be read"
+now=$(date +%s)
+send_point o11y_smoke_delta 1 3 "$((now - 20))" "$((now - 10))" || die "11: Alloy refused the first delta point"
+send_point o11y_smoke_delta 1 4 "$((now - 10))" "$now" || die "11: Alloy refused the second delta point"
+send_point o11y_smoke_cumulative 2 5 "$((now - 20))" "$now" || die "11: Alloy refused the cumulative point"
+poll 60 arrived || die "11: Mimir holds delta $seen_delta and cumulative $seen_cumulative, not 7 and 5"
+after=$(discarded) || die "11: Mimir's discarded samples could not be read"
+[[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error"
+# The conversion's state is in memory, so after a restart the same stream
+# starts again from its next delta: 2, not 9.
+delta_after_restart() {
+  seen_delta=$(mimir_value o11y_smoke_delta_total) || return 1
+  [[ $seen_delta == 2 ]]
+}
+main restart alloy >/dev/null 2>&1 || die "11: alloy did not restart"
+wait_ready alloy
+now=$(date +%s)
+send_point o11y_smoke_delta 1 2 "$((now - 5))" "$now" || die "11: Alloy refused the delta point after its restart"
+poll 60 delta_after_restart || die "11: after a restart Mimir holds delta $seen_delta, not 2"
+after=$(discarded) || die "11: Mimir's discarded samples could not be read"
+[[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error after Alloy restarted"
+ok "11: two delta points arrive in Mimir as one cumulative series at their sum, a cumulative point as itself, a restarted Alloy starts the series again, and Mimir discards none"

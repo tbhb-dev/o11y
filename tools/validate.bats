@@ -43,7 +43,11 @@ teardown() {
 }
 
 # A stub docker for the component checks. Real configs pass; the invalid
-# fixtures get whatever $STUB_INVALID says.
+# fixtures get whatever $STUB_INVALID says. Alloy's real config, validated
+# at the default stability level, names the components below it as
+# $STUB_BELOW_GA lists them, by default the one the stack runs it for, in
+# Alloy's wording. $STUB_DEFAULT_EXTRA adds a line after them, and
+# $STUB_DEFAULT_EXIT replaces Alloy's exit status of 1.
 stub_docker() {
   mkdir -p "$dir/bin"
   cat >"$dir/bin/docker" <<'STUB'
@@ -51,6 +55,18 @@ stub_docker() {
 case "$1" in
   version) echo 1.40 ;;
   run)
+    if [[ "$*" == *" validate /etc/alloy/config.alloy"* ]]; then
+      below=${STUB_BELOW_GA-otelcol.processor.deltatocumulative}
+      [[ -n $below ]] || exit 0
+      for component in $below; do
+        echo "Error: /etc/alloy/config.alloy:1:1: component \"$component\" is at stability level \"experimental\", which is below the minimum allowed stability level \"generally-available\". Use --stability.level command-line flag to enable \"experimental\" features"
+        echo
+        echo "1 | $component \"default\" {"
+      done
+      [[ -z ${STUB_DEFAULT_EXTRA:-} ]] || echo "$STUB_DEFAULT_EXTRA"
+      echo "Error: validation failed"
+      exit "${STUB_DEFAULT_EXIT:-1}"
+    fi
     [[ "$*" == */invalid/* ]] || exit 0
     case $STUB_INVALID in
       launch) echo "docker: Error response from daemon: failed to create task" >&2; exit 125 ;;
@@ -98,4 +114,34 @@ STUB
   STUB_INVALID=rejects run bash "$validate"
   [ "$status" -eq 0 ]
   [ "$(grep -c 'valid accepted, invalid rejected' <<<"$output")" -eq 4 ]
+}
+
+@test "a second component below generally available fails validation" {
+  stub_docker
+  STUB_INVALID=rejects STUB_BELOW_GA="otelcol.processor.deltatocumulative otelcol.exporter.debug" run bash "$validate"
+  [ "$status" -ne 0 ]
+  [[ $output == *"uses a component below generally available other than otelcol.processor.deltatocumulative"* ]] || false
+}
+
+@test "a config that needs no lowered stability level fails validation" {
+  stub_docker
+  STUB_INVALID=rejects STUB_BELOW_GA= run bash "$validate"
+  [ "$status" -ne 0 ]
+  [[ $output == *"passes at the default stability level"* ]] || false
+}
+
+@test "a default-level check that dies after naming the component is not a pass" {
+  stub_docker
+  STUB_INVALID=rejects STUB_DEFAULT_EXIT=137 run bash "$validate"
+  [ "$status" -ne 0 ]
+  [[ $output == *"the check at the default stability level did not run (exit 137)"* ]] || false
+  [[ $output != *"is the only component below generally available"* ]] || false
+}
+
+@test "an error the stability check doesn't recognize is not a pass" {
+  stub_docker
+  STUB_INVALID=rejects STUB_DEFAULT_EXTRA='Error: /etc/alloy/config.alloy:9:1: component "otelcol.exporter.debug" is at stability level "experimental"' run bash "$validate"
+  [ "$status" -ne 0 ]
+  [[ $output == *"holds an error this check doesn't recognize"* ]] || false
+  [[ $output != *"is the only component below generally available"* ]] || false
 }

@@ -167,3 +167,34 @@ stub() {
   STUB_OUT=503 run output_is 200 probe
   [ "$status" -eq 1 ]
 }
+
+# otlp_parse_discards reads Mimir's own /metrics.
+mimir_exposition() {
+  printf '%s\n' '# HELP cortex_build_info A metric with a constant 1 value.' '# TYPE cortex_build_info gauge' 'cortex_build_info{version="3.2.2"} 1' "$@"
+}
+
+@test "Mimir's exposition without a discard series counts as no discards" {
+  run otlp_parse_discards < <(mimir_exposition)
+  [ "$status" -eq 0 ]
+  [ "$output" = 0 ]
+}
+
+@test "otlp_parse_error discards are summed across their series and other reasons are left out" {
+  run otlp_parse_discards < <(mimir_exposition \
+    'cortex_discarded_samples_total{group="",reason="otlp_parse_error",user="anonymous"} 1' \
+    'cortex_discarded_samples_total{group="a",reason="otlp_parse_error",user="anonymous"} 2' \
+    'cortex_discarded_samples_total{group="",reason="sample_out_of_order",user="anonymous"} 40')
+  [ "$status" -eq 0 ]
+  [ "$output" = 3 ]
+}
+
+@test "an error page is not Mimir's exposition and fails rather than counting as no discards" {
+  run otlp_parse_discards <<<'404 page not found'
+  [ "$status" -ne 0 ]
+  [ -z "$output" ]
+}
+
+@test "a discard series without a number fails" {
+  run otlp_parse_discards < <(mimir_exposition 'cortex_discarded_samples_total{reason="otlp_parse_error"} garbage')
+  [ "$status" -ne 0 ]
+}
