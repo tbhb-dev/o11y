@@ -13,6 +13,7 @@ root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
 # shellcheck source=tools/lib.sh
 source tools/lib.sh
+local_engine_only
 pin_docker_api
 
 project=o11y-smoke

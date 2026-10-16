@@ -88,6 +88,7 @@ finish() {
 trap finish EXIT
 
 if [[ -z $release ]]; then
+  local_engine_only
   pin_docker_api
   isolate_environment
   compose=("$O11Y_COMPOSE")
@@ -114,6 +115,7 @@ if [[ -z $release ]]; then
   publish_s3_env "$image" "$out/s3.env"
 else
   if [[ ${#compose[@]} -eq 0 ]]; then
+    local_engine_only
     pin_docker_api
     compose=("$O11Y_COMPOSE")
   fi

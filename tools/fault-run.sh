@@ -52,6 +52,7 @@ case ${1:-} in
   ;;
 esac
 
+local_engine_only
 pin_docker_api
 
 project=o11y-fault

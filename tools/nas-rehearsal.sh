@@ -45,6 +45,7 @@ leftovers() {
 }
 
 if [[ ${1:-} != --inside ]]; then
+  local_engine_only
   base=${1:-origin/main}
   base_commit=$(git rev-parse --short "$base^{commit}") || die "the base $base is not a commit"
   [[ -z $(leftovers) ]] ||

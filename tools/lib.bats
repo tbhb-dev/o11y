@@ -142,3 +142,70 @@ stub() {
   grep -q -- '--log-driver none' "$dir/docker.args"
   [ "$O11Y_S3_ENV_FILE" = "$dir/s3.env" ]
 }
+
+# A docker stub for the local-engine guard. It records each call with the
+# DOCKER_HOST and DOCKER_CONTEXT it saw, and answers as STUB_CONTEXT,
+# STUB_ENDPOINT and STUB_INFO say.
+engine_stub() {
+  mkdir -p "$dir/bin"
+  cat >"$dir/bin/docker" <<'STUB'
+#!/bin/sh
+printf '%s|%s|%s\n' "${DOCKER_HOST:-}" "${DOCKER_CONTEXT:-}" "$*" >>"$STUB_LOG"
+case "$1 $2" in
+"context show") echo "$STUB_CONTEXT" ;;
+"context inspect") echo "$STUB_ENDPOINT" ;;
+"info --format") echo "$STUB_INFO" ;;
+*) echo "engine work: $*" >>"$STUB_LOG.work" ;;
+esac
+STUB
+  chmod +x "$dir/bin/docker"
+  export PATH="$dir/bin:$PATH" STUB_LOG=$dir/docker.log STUB_CONTEXT=default STUB_ENDPOINT=unix:///var/run/docker.sock
+  if host_is_linux; then
+    STUB_INFO="$(uname -n)|Ubuntu 24.04"
+  else
+    STUB_INFO="docker-desktop|Docker Desktop"
+  fi
+  export STUB_INFO
+}
+
+@test "the local engine guard drops an inherited remote endpoint before any call" {
+  engine_stub
+  DOCKER_HOST=tcp://nas.example.invalid:2376 DOCKER_CONTEXT=nas run local_engine_only
+  [ "$status" -eq 0 ]
+  ! grep -q 'nas' "$dir/docker.log" || false
+}
+
+@test "a remote context, a non-local socket or another engine stops before any engine work" {
+  engine_stub
+  STUB_CONTEXT=nas run local_engine_only
+  [ "$status" -ne 0 ]
+  [[ $output != *nas* ]] || false
+  ! grep -q '|info ' "$dir/docker.log" || false
+  STUB_ENDPOINT=ssh://admin@nas.example.invalid run local_engine_only
+  [ "$status" -ne 0 ]
+  ! grep -q '|info ' "$dir/docker.log" || false
+  STUB_INFO="nas-node-01|Synology" run local_engine_only
+  [ "$status" -ne 0 ]
+  [[ $output != *nas-node-01* ]] || false
+  [ ! -e "$dir/docker.log.work" ]
+}
+
+@test "the fault run with a remote endpoint stops before its first engine call" {
+  engine_stub
+  STUB_CONTEXT=nas run bash "$BATS_TEST_DIRNAME/fault-run.sh"
+  [ "$status" -ne 0 ]
+  [[ $output == *"local engine:"* ]] || false
+  [ ! -e "$dir/docker.log.work" ]
+  ! grep -qE '\|(version|info|run|ps|rm)' "$dir/docker.log" || false
+}
+
+@test "smoke, the rehearsal, the RustFS probe and validation stop on a remote context too" {
+  engine_stub
+  for script in smoke.sh nas-rehearsal.sh rustfs-probe.sh validate.sh; do
+    rm -f "$dir/docker.log.work"
+    STUB_CONTEXT=nas run bash "$BATS_TEST_DIRNAME/$script"
+    [ "$status" -ne 0 ]
+    [[ $output == *"local engine:"* ]] || false
+    [ ! -e "$dir/docker.log.work" ]
+  done
+}
