@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 # tools/check-negated-status.sh on small scripts: a negated grep -q or
 # cmp -s fails unless an allow comment with a reason is on the line before.
-# cspell:ignore chdir subshell quie
+# cspell:ignore chdir egrep fgrep subshell quie
 
 setup() {
   dir=$(mktemp -d)
@@ -196,6 +196,68 @@ script() {
   local line
   for line in '! env LC_ALL="$locale" grep -q x missing' "! env 'LC_ALL=C' grep -q x f" \
     '! env "LC_ALL=$locale" grep -q x missing' '! env "LC_ALL"=C grep -q x f'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+# Codex's reproductions on #15, and a case for each header claim the
+# earlier cases left out.
+
+@test "an escaped or quoted command name is still grep or cmp" {
+  local line
+  for line in '! \grep -q x missing' '! gr\ep -\q x f' '! "grep" -q x f' "! 'cmp' -s a b"; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "every prefix of --quiet and --silent fails, down to --q and --s" {
+  local line
+  for line in '! cmp --s missing input' '! grep --s x f' '! grep --q x f' '! cmp --q a b'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+  script '! grep --sx a f'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 0 ]
+}
+
+@test "egrep, fgrep and a clustered cmp -s fail" {
+  local line
+  for line in '! egrep -q x f' '! fgrep -q x f' '! cmp -bs a b'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "exec -a, and env -C, -S and --split-string with their arguments" {
+  local line
+  for line in '! exec -a name grep -q x f' '! exec -c grep -q x f' '! env -C /tmp grep -q x f' '! env -S x grep -q x f' \
+    '! env --split-string x grep -q x f'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "the argument of grep --file and of cmp -n, --bytes and --ignore-initial is skipped" {
+  local line
+  for line in '! grep --file -- -q f' '! cmp -n -- -s a b' '! cmp --bytes -- -s a b' \
+    '! cmp --ignore-initial -- -s a b' '! cmp -bi -- -s a b'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "either side of && or || inside braces or a subshell, nested or not, fails" {
+  local line
+  for line in '! { true && grep -q a f; }' '! (grep -q a f || true)' '! (x; (y; cmp -s a b))'; do
     script "$line"
     run bash "$check" "$dir/t.sh"
     [ "$status" -eq 1 ]

@@ -18,8 +18,10 @@
 #   a pipeline split across lines don't hide a negation. A file shfmt
 #   can't parse fails.
 # - A statement negated with ! fails when its status can come from a quiet
-#   grep or cmp: any stage of a pipeline, either side of && or ||, and the
-#   last statement inside ( ) or { }.
+#   grep or cmp: any stage of its pipeline, and the last statement inside
+#   ( ) or { }, nested or not, including either side of && or || there.
+# - It reads each literal word as the shell does, with quotes and the
+#   backslash escapes of unquoted text removed, so \grep is grep.
 # - The command is grep, egrep, fgrep or cmp, named by a literal word or a
 #   literal path to one.
 # - Before the command it skips, by name or by path, a leading command or
@@ -30,8 +32,8 @@
 #   read from the literal text before any expansion, across unquoted,
 #   single-quoted and double-quoted parts.
 # - Quiet means a literal option word before -- that is a short cluster
-#   holding q (s for cmp), or --quiet, --silent or an unambiguous prefix of
-#   either. It skips the word after grep's -e, -f, --regexp and --file and
+#   holding q (s for cmp), or --quiet, --silent or any prefix of either
+#   down to --q and --s. It skips the word after grep's -e, -f, --regexp and --file and
 #   after cmp's -i, -n, --ignore-initial and --bytes, also when the option
 #   ends a short cluster.
 # - A "# lint-negated: allow <reason>" comment on the line right above a
@@ -44,7 +46,7 @@
 # for; a function that runs grep or cmp; eval and sh -c; and commands
 # inside a string that runs elsewhere, such as the remote commands
 # tools/nas.sh builds.
-# cspell:ignore chdir egrep fgrep endswith getopt subshell Subshell Stmts
+# cspell:ignore chdir egrep fgrep endswith getopt gsub subshell Subshell Stmts
 set -euo pipefail
 
 if [[ $# -eq 0 ]]; then
@@ -55,10 +57,15 @@ fi
 # from a quiet grep or cmp, one "line col" pair per line.
 negations() {
   shfmt --to-json <"$1" | jq -r '
-    # A word with no expansion in it, quotes removed; null otherwise.
+    # An unquoted literal with its backslash escapes removed, as the shell
+    # reads it.
+    def unescape: gsub("\\\\(?<c>.)"; .c);
+    # A word with no expansion in it, quotes and escapes removed; null
+    # otherwise.
     def word:
       [.Parts[] |
-        if .Type == "Lit" or .Type == "SglQuoted" then .Value
+        if .Type == "Lit" then .Value | unescape
+        elif .Type == "SglQuoted" then .Value
         elif .Type == "DblQuoted" then
           (if all(.Parts[]?; .Type == "Lit") then ([.Parts[]?.Value] | join("")) else null end)
         else null end] |
@@ -68,7 +75,8 @@ negations() {
     def lead:
       reduce .Parts[] as $p ({text: "", open: true};
         if (.open | not) then .
-        elif $p.Type == "Lit" or $p.Type == "SglQuoted" then .text += $p.Value
+        elif $p.Type == "Lit" then .text += ($p.Value | unescape)
+        elif $p.Type == "SglQuoted" then .text += $p.Value
         elif $p.Type == "DblQuoted" then
           reduce ($p.Parts // [])[] as $q (.;
             if .open and $q.Type == "Lit" then .text += $q.Value else .open = false end)
@@ -104,8 +112,9 @@ negations() {
         elif ($w | test("^-[A-Za-z]+$")) and ($takes | any(. as $t | ($t | length) == 2 and ($w | endswith($t[1:2])))) then .out += [$w] | .skip = true
         else .out += [$w] end) | .out;
     def short($c): any(.[]; test("^-[A-Za-z]*" + $c));
-    # getopt takes any unambiguous prefix of a long option.
-    def quiet_long: any(.[]; test("^--(qu?i?e?t?|sil?e?n?t?)$") and (. == "--q" or test("^--(qu|si)")));
+    # getopt takes any unambiguous prefix of a long option, and no other
+    # long option of grep or cmp starts with q or s.
+    def quiet_long: any(.[]; test("^--(q(u(i(e(t)?)?)?)?|s(i(l(e(n(t)?)?)?)?)?)$"));
     def quiet:
       ([.Args[] | [word, lead]] | unwrap | map(.[0])) as $w |
       (($w[0] // "") | split("/") | last) as $name |
