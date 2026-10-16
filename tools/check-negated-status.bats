@@ -1,6 +1,7 @@
 #!/usr/bin/env bats
 # tools/check-negated-status.sh on small scripts: a negated grep -q or
 # cmp -s fails unless an allow comment with a reason is on the line before.
+# cspell:ignore subshell quie
 
 setup() {
   dir=$(mktemp -d)
@@ -64,4 +65,55 @@ script() {
   cd "$BATS_TEST_DIRNAME/.."
   run bash "$check"
   [ "$status" -eq 0 ]
+}
+
+# The four shapes a line-based check missed.
+
+@test "a negated pipeline split after its pipe fails" {
+  script '! printf "%s\n" "$log" |' '  grep -q dump || die'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == "$dir/t.sh:2: a negated"* ]]
+}
+
+@test "a grep continued with a backslash before -q fails" {
+  script '! grep -i \' '  -q dump file || die'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+}
+
+@test "a multiline negated subshell whose last command is a quiet grep fails" {
+  script '! (' '  cd /tmp' '  grep -q dump file' ') || die'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+}
+
+@test "a quoted hash before the grep doesn't hide it" {
+  script '! printf "%s\n" "# x" | grep -q x || die'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+}
+
+@test "long, abbreviated and clustered quiet flags, a path to grep and cmp --silent fail" {
+  local line
+  for line in '! grep --quiet a f' '! grep --qui a f' '! grep --sil a f' '! grep -iqE a f' '! /usr/bin/grep -q a f' '! grep a f -q' '! cmp --silent a b' '! cmp --quie a b' '! { x; cmp -s a b; }'; do
+    script "$line"
+    run bash "$check" "$dir/t.sh"
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "of four negations, only the negated cmp -s fails" {
+  script '! grep -q a f | wc -l' '! cmp -s a b && true' '! grep -- -q f' 'grep -q a f || die'
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [ "$(grep -c 'a negated' <<<"$output")" -eq 1 ]
+  [[ $output == "$dir/t.sh:3: a negated"* ]]
+}
+
+@test "a script shfmt can't parse fails" {
+  script 'if then fi ((('
+  run bash "$check" "$dir/t.sh"
+  [ "$status" -eq 1 ]
+  [[ $output == *"shfmt could not parse it"* ]]
 }
