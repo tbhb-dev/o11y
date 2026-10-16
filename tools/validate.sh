@@ -235,7 +235,10 @@ fi
 # The self path: its exporter's queue is bounded in items, and its
 # receiver accepts no gRPC.
 self_path=$(sed -n '/^otelcol.receiver.otlp "self"/,/^}/p; /^otelcol.exporter.otlphttp "mimir_self"/,/^}/p' "$alloy_dir/config.alloy")
-if grep -qE '^\t\tsizer += "items"$' <<<"$self_path" && grep -qE '^\t\tqueue_size += [0-9]+$' <<<"$self_path" && ! grep -q 'grpc' <<<"$self_path"; then
+# awk, not grep -E: POSIX extended expressions have no \t, and GNU grep
+# reads it as a plain t.
+if awk '/^\t\tsizer += "items"$/ { sizer = 1 } /^\t\tqueue_size += [0-9]+$/ { size = 1 } /grpc/ { grpc = 1 }
+  END { exit !(sizer && size && !grpc) }' <<<"$self_path"; then
   ok "alloy: the self receiver is HTTP only, and its exporter's queue is bounded in items"
 else
   echo "FAIL alloy: the self receiver takes gRPC, or its exporter's queue is not bounded in items" >&2
