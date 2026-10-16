@@ -1896,12 +1896,22 @@ wait_for() {
 }
 
 @test "a reserve that is not a whole number of GiB is rejected by name before any ssh call" {
-  for value in 50G -1 1e3; do
+  for value in 50G -1 1e3 08 007; do
     O11Y_DISK_RESERVE_GB=$value go deploy
     [ "$status" -ne 0 ]
-    [[ $output == *"O11Y_DISK_RESERVE_GB must be a whole number of GiB"* ]] || false
+    [[ $output == *"O11Y_DISK_RESERVE_GB must be a whole number of GiB, with no leading zero"* ]] || false
   done
   [ ! -e "$dir/ssh.log" ]
+}
+
+@test "a reserve of 0 is a valid reserve, and 10 is read as ten, not as octal" {
+  healthy o11y
+  O11Y_DISK_RESERVE_GB=0 STUB_DISK_FREE=$((200 * 1048576)) go deploy
+  [ "$status" -eq 0 ]
+  rm "$repo/tmp/deploy/staged"
+  O11Y_DISK_RESERVE_GB=10 STUB_DISK_FREE=$((9 * 1048576)) STUB_DISK_TOTAL=$((50 * 1048576)) go deploy
+  [ "$status" -ne 0 ]
+  [[ $output == *"below the reserve of 10 GiB"* ]] || false
 }
 
 @test "a df that prints the free space and then fails fails the gate" {
