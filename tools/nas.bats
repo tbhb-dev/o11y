@@ -676,14 +676,14 @@ everything() {
   ! grep -q 'O11Y_ALERT_SMTP' "$remote/releases/$id/.env" || false
 }
 
-email_on() {
+set_email() {
   export O11Y_ALERT_EMAIL_TO=to@example.invalid O11Y_ALERT_SMTP_HOST=smtp.example.invalid O11Y_ALERT_SMTP_PORT=587
   export O11Y_ALERT_SMTP_USER=user@example.invalid O11Y_ALERT_SMTP_FROM=from@example.invalid
   export O11Y_ALERT_SMTP_PASSWORD_REF='op:''//wombat-vault/Numbat smtp item/password'
 }
 
 @test "with email on, deploy pipes the SMTP password to the host as well, and the release carries the SMTP settings" {
-  email_on
+  set_email
   healthy o11y
   go deploy
   [ "$status" -eq 0 ]
@@ -704,21 +704,31 @@ read --no-newline $O11Y_ALERT_SMTP_PASSWORD_REF" ]
   ! grep -qF -e '@example.invalid' -e 'Numbat smtp item' "$dir/output" || false
 }
 
-@test "with email on and no SMTP password reference, deploy stops before any SSH and names the variable" {
-  email_on
-  unset O11Y_ALERT_SMTP_PASSWORD_REF
+@test "with a recipient and an empty SMTP password reference, deploy warns, renders no email receiver and asks op only for the webhook" {
+  set_email
+  export O11Y_ALERT_SMTP_PASSWORD_REF=
+  healthy o11y
   go deploy
-  [ "$status" -ne 0 ]
-  [[ $output == *"O11Y_ALERT_SMTP_PASSWORD_REF must name the 1Password secret reference of the SMTP password"* ]] || false
-  [ ! -e "$dir/ssh.log" ]
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARN deploy: O11Y_ALERT_SMTP_PASSWORD_REF is empty, so the release has no email receiver"* ]] || false
+  id=$(staged)
+  ! grep -q '^O11Y_ALERT_' "$remote/releases/$id/.env" || false
+  ! grep -rq 'o11y-email' "$remote"/config/grafana-*/provisioning/alerting/ || false
+  [ "$(cat "$dir/op.log")" = "read --no-newline $O11Y_ALERT_DISCORD_WEBHOOK_REF" ]
+  [ ! -e "$dir/smtp.stdin" ]
+  [ "$(readlink "$remote/current")" = "releases/$id" ]
 }
 
-@test "deploy without the webhook reference stops before any SSH and names the variable" {
-  unset O11Y_ALERT_DISCORD_WEBHOOK_REF
+@test "with every reference empty, deploy warns, calls op for nothing, writes no secret and still promotes" {
+  export O11Y_ALERT_DISCORD_WEBHOOK_REF=
+  healthy o11y
   go deploy
-  [ "$status" -ne 0 ]
-  [[ $output == *"O11Y_ALERT_DISCORD_WEBHOOK_REF must name the 1Password secret reference"* ]] || false
-  [ ! -e "$dir/ssh.log" ]
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARN deploy: O11Y_ALERT_DISCORD_WEBHOOK_REF is empty, so no Discord webhook URL was sent"* ]] || false
+  [ ! -e "$dir/op.log" ]
+  ! recorded alert_discord_webhook_url || false
+  [ ! -e "$dir/webhook.stdin" ]
+  [ "$(readlink "$remote/current")" = "releases/$(staged)" ]
 }
 
 @test "a locked 1Password or a refused URL stops deploy before up and promotes nothing" {

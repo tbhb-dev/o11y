@@ -53,13 +53,16 @@
 #                          percent of the filesystem; the disk alert uses it
 #   O11Y_ALERT_DISCORD_WEBHOOK_REF
 #                          the 1Password secret reference that `op read`
-#                          resolves to the Discord webhook URL, for deploy
+#                          resolves to the Discord webhook URL, for deploy.
+#                          Empty, deploy warns and sends none, and the
+#                          receiver keeps the URL it has, init's placeholder
+#                          at first
 #   O11Y_ALERT_EMAIL_TO    the recipient of email alerts; email is off when
 #                          it is empty, and render.sh checks the SMTP
 #                          settings that come with it
 #   O11Y_ALERT_SMTP_PASSWORD_REF
-#                          the same for the SMTP password, needed with
-#                          O11Y_ALERT_EMAIL_TO
+#                          the same for the SMTP password. Empty, the
+#                          release renders with email off, with a warning
 #
 # Output is variable names, release ids and pass or fail lines. Everything
 # a task prints goes to tmp/deploy/<task>.log, and the remote diagnostics it
@@ -142,11 +145,8 @@ need() {
       need_port O11Y_OTLP_HTTP_PORT "$http_port"
       ;;
     alert)
-      [[ -n ${O11Y_ALERT_DISCORD_WEBHOOK_REF:-} ]] ||
-        die "$task: O11Y_ALERT_DISCORD_WEBHOOK_REF must name the 1Password secret reference of the Discord webhook URL"
-      [[ -z ${O11Y_ALERT_EMAIL_TO:-} || -n ${O11Y_ALERT_SMTP_PASSWORD_REF:-} ]] ||
-        die "$task: O11Y_ALERT_SMTP_PASSWORD_REF must name the 1Password secret reference of the SMTP password, since O11Y_ALERT_EMAIL_TO is set"
-      command -v op >/dev/null || die "$task: the 1Password CLI, op, is not on PATH, and it reads the alert secrets"
+      [[ -z ${O11Y_ALERT_DISCORD_WEBHOOK_REF:-}${O11Y_ALERT_SMTP_PASSWORD_REF:-} ]] || command -v op >/dev/null ||
+        die "$task: the 1Password CLI, op, is not on PATH, and it reads the alert secrets"
       ;;
     esac
   done
@@ -398,6 +398,11 @@ render_release() {
     export O11Y_GRAFANA_PORT=$5 O11Y_OTLP_GRPC_PORT=$6 O11Y_OTLP_HTTP_PORT=$7
     # The deployment.environment.name the stack stamps on its own metrics.
     if [[ $project == o11y-gate ]]; then export O11Y_ENVIRONMENT=gate; else export O11Y_ENVIRONMENT=production; fi
+    # Email needs its password, so without a reference it stays off.
+    if [[ -n ${O11Y_ALERT_EMAIL_TO:-} && -z ${O11Y_ALERT_SMTP_PASSWORD_REF:-} ]]; then
+      echo "WARN $task: O11Y_ALERT_SMTP_PASSWORD_REF is empty, so the release has no email receiver"
+      unset O11Y_ALERT_EMAIL_TO
+    fi
     # deploy-plan reads no host, and renders the default.
     if [[ -n $remote_host_name ]]; then export O11Y_HOST_NAME=$remote_host_name; else unset O11Y_HOST_NAME; fi
     tools/render.sh "$out" --config-root "$dir/config"
@@ -667,11 +672,31 @@ send_secret() {
   }
 }
 
-# send_secrets: the webhook URL always, the SMTP password with email on.
+# email_on <release id>: the release renders the email receiver. An env
+# file that can't be read stops the task rather than reading as email off.
+email_on() {
+  local status=0
+  grep -qx O11Y_ALERT_SMTP_ENABLED=true "tmp/deploy/$1/release/.env" || status=$?
+  case $status in
+  0) return 0 ;;
+  1) return 1 ;;
+  *) die "$task: the env file of release $1 could not be read" ;;
+  esac
+}
+
+# send_secrets <release id>: the webhook URL when it has a reference, and
+# the SMTP password when the release has email on. Grafana refuses to start
+# with a contact point that has no receiver, so a Discord receiver without
+# a reference stays, on the URL already there: init's placeholder, which
+# refuses every connection, until a deploy sends a real one.
 send_secrets() {
-  send_secret O11Y_ALERT_DISCORD_WEBHOOK_REF alert_discord_webhook_url "$webhook_re" \
-    "the Discord webhook URL" "not a Discord webhook URL" || return 1
-  [[ -z ${O11Y_ALERT_EMAIL_TO:-} ]] ||
+  if [[ -n ${O11Y_ALERT_DISCORD_WEBHOOK_REF:-} ]]; then
+    send_secret O11Y_ALERT_DISCORD_WEBHOOK_REF alert_discord_webhook_url "$webhook_re" \
+      "the Discord webhook URL" "not a Discord webhook URL" || return 1
+  else
+    echo "WARN $task: O11Y_ALERT_DISCORD_WEBHOOK_REF is empty, so no Discord webhook URL was sent and the Discord receiver keeps the one it has"
+  fi
+  ! email_on "$1" ||
     send_secret O11Y_ALERT_SMTP_PASSWORD_REF alert_smtp_password "$smtp_password_re" \
       "the SMTP password" "empty or not printable"
 }
@@ -802,8 +827,9 @@ deploy_plan() {
     attempt_cmd "$id"
     data_cmd
     echo "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init"
-    echo "op read \$O11Y_ALERT_DISCORD_WEBHOOK_REF | $(secret_cmd alert_discord_webhook_url "$webhook_re")    # the Discord webhook URL, on stdin"
-    [[ -z ${O11Y_ALERT_EMAIL_TO:-} ]] ||
+    [[ -z ${O11Y_ALERT_DISCORD_WEBHOOK_REF:-} ]] ||
+      echo "op read \$O11Y_ALERT_DISCORD_WEBHOOK_REF | $(secret_cmd alert_discord_webhook_url "$webhook_re")    # the Discord webhook URL, on stdin"
+    ! email_on plan ||
       echo "op read \$O11Y_ALERT_SMTP_PASSWORD_REF | $(secret_cmd alert_smtp_password "$smtp_password_re")    # the SMTP password, on stdin"
     up_cmd "$id"
     echo "$docker ps -a $(of_project o11y) --format ...    # repeated until every service is up and healthy"
@@ -831,7 +857,7 @@ deploy() {
   quiet remote "$(data_cmd)" || die "$task: the data directory could not be created"
   # shellcheck disable=SC2312 # the command builders only echo
   if quiet remote "$(compose_cmd o11y "$dir/releases/$id" .env compose.init.yaml) run --rm -T init" &&
-    send_secrets &&
+    send_secrets "$id" &&
     quiet remote "$(up_cmd "$id")" &&
     health_gate o11y; then
     swap_pending="$id $current"
