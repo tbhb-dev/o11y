@@ -6,13 +6,17 @@ One Compose project runs the six services. Grafana Alloy receives OpenTelemetry 
 
 ## Development
 
-Run `mise run bootstrap` to sync the vendored payload, then set up the pinned tools, `guard-markdown` and the git hooks. Then run `mise run lint` and `mise run test` to run the checks. The shared tasks come from the [devtools](https://github.com/tbhb-dev/devtools) toolchain.
+Run `mise run bootstrap` to sync the vendored payload, then set up the pinned tools and the git hooks. These tools include `guard-markdown`, pinned through the Go backend in mise at the devtools release. Then run the checks: `mise run lint` and `mise run test`. Shared tasks come from the [devtools](https://github.com/tbhb-dev/devtools) toolchain.
+
+During `mise run lint`, the shared vendored check syncs in place and compares against the index. Review and stage payload updates before running it. The shared leak gate and pre-push wrapper use the private literal list described below.
 
 Two more checks need a Docker engine. `mise run validate` loads the Compose models and runs each component's own settings check. `mise run smoke` boots the stack locally and proves that it stores and returns telemetry.
 
 ## Deploying
 
 One host runs the stack, reached over SSH. Copy `mise.local.toml.example` to `mise.local.toml`, which git ignores, and set the `O11Y_*` values that the header of `tools/nas.sh` lists. Each task that changes the host refuses to run unless `O11Y_CONFIRM` names it, as in `O11Y_CONFIRM=stage mise run stage`. Those that change the stack or its directory also take a lock on the host, so only one of them runs at a time.
+
+In `mise.local.toml`, set `O11Y_PRIVATE_STRINGS` under `[env]` to a comma-separated list of plain private literals: host names, logins, addresses, paths, tailnet domains and private labels, site-specific cluster names, and model identifiers. List them explicitly because the shared leak gate doesn't derive them from deployment variables or recorded host names. Keep the deployment variables in place. See `mise.local.toml.example` for the format.
 
 `preflight`, `gate-test` and `deploy` refuse to start when the filesystem under `$O11Y_REMOTE_DIR` has less than `O11Y_DISK_RESERVE_GB` free (50 GiB unless set) or less than 10 percent free, and `status` prints the free space. `rollback` skips that check, so going back to the last release that passed works on a full disk too.
 

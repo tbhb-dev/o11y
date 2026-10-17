@@ -14,6 +14,8 @@ vendir = "0.46.1"
 apm = "0.33.0"
 shfmt = "3.14.1"
 jq = "1.8.2"
+# Keep guard-markdown at the devtools release; Renovate reads the go backend pin.
+"go:github.com/tbhb-dev/devtools/cmd/guard-markdown" = "v0.11.0"
 # Runs tools/apm_audit.py, the one Python file this repo needs.
 uv = "0.12.23"
 # The Compose version the deploy host runs, so the local tests load and run
@@ -29,6 +31,7 @@ includes = [
   ".devtools/tasks/fix.toml",
   ".devtools/tasks/format.toml",
   ".devtools/tasks/git-hooks.toml",
+  ".devtools/tasks/leaks.toml",
   ".devtools/tasks/lint.toml",
   ".devtools/tasks/pins.toml",
   ".devtools/tasks/preapproval.toml",
@@ -44,9 +47,7 @@ run = [
   "vendir sync",
   "mise run install-toolchain",
   "mise run install-tools",
-  "mise run install-guard-markdown",
   "mise run devtools:prek-install",
-  "mise run install-pre-push",
 ]
 
 [tasks.install-toolchain]
@@ -57,43 +58,6 @@ run = "mise install"
 description = "Download the Vale style packages .vale.ini names"
 run = "vale sync"
 
-# guard-markdown backs lint-markdown-wrap and the Claude write hook, and mise
-# has no pin for it. The version comes from the devtools pin in apm.yml, the
-# site devtools:update-pins moves, so a pin bump moves this install too.
-[tasks.install-guard-markdown]
-description = "Install guard-markdown at the version the devtools pin in apm.yml names"
-run = '''
-#!/usr/bin/env bash
-set -euo pipefail
-version=$(bash tools/devtools-pin.sh)
-go install "github.com/tbhb-dev/devtools/cmd/guard-markdown@${version}"
-gobin="$(go env GOPATH)/bin"
-case ":$PATH:" in
-  *":$gobin:"*) ;;
-  *) echo "add $gobin to PATH so guard-markdown resolves" >&2 ;;
-esac
-'''
-
-[tasks.check-vendored]
-description = "Fail when the vendored payload differs from what vendir.lock.yml pins, without touching the checkout"
-run = "bash tools/check-vendored.sh"
-
-# Arguments pass through to the script: `mise run lint-leaks -- --staged`.
-# With none it scans the working tree.
-# quiet keeps mise from echoing the arguments, which can be private filenames.
-[tasks.lint-leaks]
-description = "Fail when a file carries a private value or a private-network pattern"
-quiet = true
-run = "bash tools/check-leaks.sh"
-
-[tasks.install-pre-push]
-description = "Put the leak check in front of prek's pre-push hook"
-run = "bash tools/install-pre-push.sh"
-
-[tasks.lint-hooks]
-description = "Fail locally when the leak-check pre-push hook isn't installed"
-run = "bash tools/install-pre-push.sh --check"
-
 # APM merges hook declarations into each harness's settings additively and
 # never reconciles, while `apm audit --ci` replays the same merge from an
 # empty tree and compares. Clearing the keys APM owns first hands the
@@ -102,7 +66,7 @@ run = "bash tools/install-pre-push.sh --check"
 # calls this task by name.
 [tasks.apm-sync]
 description = "Redeploy the APM primitives from a cleared hook state, then audit"
-depends_post = ["lint-apm", "lint-apm-deploy"]
+depends_post = ["lint-apm"]
 run = '''
 #!/usr/bin/env bash
 set -euo pipefail
@@ -128,13 +92,6 @@ apm install
 description = "Check the deployed APM primitives against apm.lock.yaml"
 run = "uv run --no-project --python 3.14 python tools/apm_audit.py"
 
-# The bare devtools pin plus `target: [claude, codex]` is assumed to
-# deploy the claude, common, and codex packages and nothing for
-# antigravity (D13). This holds that assumption to the recorded deploy.
-[tasks.lint-apm-deploy]
-description = "Fail when the deployed APM primitives differ from the recorded frozen-consumer set"
-run = "bash tools/check-apm-deploy.sh"
-
 [tasks.lint-commit-msg]
 extends = "devtools:lint-commit-msg"
 
@@ -150,7 +107,7 @@ run = [
   "bash .claude/skills/pr/scripts/validate-description.sh",
   "vale --output=ai-tells-agent.tmpl PR_AGENTDESC.md",
   "cspell --config .cspell.jsonc --no-summary --no-progress PR_AGENTDESC.md",
-  "bash tools/check-leaks.sh PR_AGENTDESC.md",
+  "mise run devtools:lint-leaks -- PR_AGENTDESC.md",
 ]
 
 # Both draft tasks are scoped to the one file they receive. The fix-prose
@@ -215,12 +172,11 @@ run = "bash tools/check-negated-status.sh"
 [tasks.lint]
 extends = "devtools:lint"
 run = [
-  "mise run check-vendored",
-  "mise run lint-leaks",
-  "mise run lint-hooks",
+  "mise run devtools:check-vendored",
+  "mise run devtools:lint-leaks",
+  "mise run devtools:check-leak-hook",
   "mise run devtools:check-pins",
   "mise run lint-apm",
-  "mise run lint-apm-deploy",
   "mise run lint-prose",
   "mise run devtools:lint-spelling",
   "mise run devtools:lint-markdown",
@@ -236,17 +192,9 @@ run = [
   "mise run lint-negated",
 ]
 
-[tasks.test-vendored]
-description = "Test the vendored-payload drift gate on a copy of the tree"
-run = "bats tools/check-vendored.bats"
-
 [tasks.test-tools]
-description = "Test the devtools pin parser, the prose fixer's failure handling, the curl check and the negated-status check"
-run = "bats tools/devtools-pin.bats tools/fix-prose-replacements.bats tools/check-curl-fail.bats tools/check-negated-status.bats"
-
-[tasks.test-leaks]
-description = "Test the leak check against throwaway repositories"
-run = "bats tools/check-leaks.bats"
+description = "Test the prose fixer's failure handling, the curl check and the negated-status check"
+run = "bats tools/fix-prose-replacements.bats tools/check-curl-fail.bats tools/check-negated-status.bats"
 
 [tasks.test-stack]
 description = "Test the release renderer, the S3 probe, validation's isolation, the fault run's memory verdict, and the shared test helpers"
@@ -270,13 +218,7 @@ run = "bash tools/fault-run.sh"
 
 [tasks.test]
 description = "Run every test suite"
-run = [
-  "mise run test-vendored",
-  "mise run test-tools",
-  "mise run test-leaks",
-  "mise run test-stack",
-  "mise run test-nas",
-]
+run = ["mise run test-tools", "mise run test-stack", "mise run test-nas"]
 
 [tasks.check]
 description = "Fast quality bar: lint then test"

@@ -78,6 +78,10 @@ checksum = "sha256:7e6f1f0e5fadd6f834de067f4e321560eb1b6465dff62f59cffe36a23a300
 url = "https://github.com/docker/compose/releases/download/v2.20.1/docker-compose-windows-x86_64.exe"
 url_api = "https://api.github.com/repos/docker/compose/releases/assets/117576797"
 
+[[tools."go:github.com/tbhb-dev/devtools/cmd/guard-markdown"]]
+version = "0.11.0"
+backend = "go:github.com/tbhb-dev/devtools/cmd/guard-markdown"
+
 [[tools.jq]]
 version = "1.8.2"
 backend = "aqua:jqlang/jq"

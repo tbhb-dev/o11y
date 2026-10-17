@@ -6,8 +6,7 @@
 # through mise and run their gates through `mise run`, so the mise config
 # stays the single definition of what each gate runs. The lint job runs the
 # full bar via `mise run lint`, which includes actionlint, after syncing the
-# Vale styles. The test job runs `mise run test`, which checks that the
-# vendored devtools payload still matches what vendir.lock.yml pins.
+# Vale styles. The test job runs `mise run test` for the local tool and stack suites.
 
 name: ci
 
@@ -58,27 +57,10 @@ jobs:
           # renovate: datasource=github-releases depName=jdx/mise
           version: 2026.10.3
 
-      # Resyncs the devtools payload in place from vendir.yml, ignoring the
-      # lock's stored SHAs, and fails on any difference from the committed
-      # tree. That catches a vendored file edited in place, a sync nobody
-      # committed, and a manifest bump whose vendir.lock.yml is stale. The
-      # in-place sync is safe on a clean CI checkout. The local lint bar runs
-      # the locked scratch comparison, check-vendored, so it can't overwrite
-      # unstaged edits.
-      - name: Check the vendored payload
-        run: mise run devtools:check-vendored
-
       # mise installs the vale binary but does not fetch the style packages
       # .vale.ini declares.
       - name: Sync Vale styles
         run: mise run install-tools
-
-      # guard-markdown backs lint-markdown-wrap. The task installs the
-      # version the devtools pin in apm.yml names.
-      - name: Install guard-markdown
-        run: |
-          mise run install-guard-markdown
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Lint
         run: mise run lint
@@ -88,7 +70,7 @@ jobs:
       # request adds, messages included, with the same patterns.
       - name: Leak check on the pull request commits
         if: github.event_name == 'pull_request'
-        run: bash tools/check-leaks.sh --range origin/main..HEAD
+        run: mise run devtools:lint-leaks -- --range origin/main..HEAD
 
   test:
     name: test
