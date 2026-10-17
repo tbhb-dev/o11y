@@ -26,7 +26,7 @@ repos:
   # COMMIT_AGENTMSG draft once a commit lands. vale-commit-msg and
   # cspell-commit-msg read this repository's .vale.ini and .cspell.jsonc.
   - repo: https://github.com/tbhb-dev/devtools
-    rev: d80265aa04fd10bbfe3965200ddbe3d5d1563c38  # frozen: v0.10.0
+    rev: 902790ab90cb5e018d22c54ea4bb12711f632253  # frozen: v0.11.0
     hooks:
       - id: commit-trailers
       - id: commitlint
@@ -34,6 +34,9 @@ repos:
       - id: cspell-commit-msg
       - id: clear-commit-agentmsg
       - id: guard-markdown
+      - id: leaks-staged
+      - id: leaks-commit-msg
+      - id: leaks-pre-push
 
   - repo: local
     hooks:
@@ -113,40 +116,14 @@ repos:
         files: ^(apm\.(yml|lock\.yaml)$|\.claude/|\.agents/|\.codex/hooks\.json$)
         pass_filenames: false
 
-      - id: apm-deploy
-        name: APM frozen-consumer check
-        entry: mise run lint-apm-deploy
-        language: system
-        files: ^(apm\.(yml|lock\.yaml)$|tools/apm-deploy\.txt$|\.claude/|\.agents/)
-        pass_filenames: false
-
       # The vendir drift gate: resync and fail on any difference against
       # what git holds.
       - id: check-vendored
         name: vendir drift check
-        entry: mise run check-vendored
+        entry: mise run devtools:check-vendored
         language: system
         files: ^(vendir\.(yml|lock\.yml)$|\.config/mise/conf\.d/|\.devtools/)
         pass_filenames: false
-
-      # The leak check, at two stages. Staged scans the index blobs, so a
-      # private value cannot hide behind a cleaned working file. The message
-      # file arrives as the hook's argument. The pre-push stage isn't here:
-      # prek hides git's ref lines, so tools/install-pre-push.sh puts the
-      # check in front of prek's pre-push hook instead.
-      - id: leaks-staged
-        name: leak check (staged files)
-        entry: mise run lint-leaks -- --staged
-        language: system
-        stages: [pre-commit]
-        always_run: true
-        pass_filenames: false
-
-      - id: leaks-commit-msg
-        name: leak check (commit message)
-        entry: mise run lint-leaks --
-        language: system
-        stages: [commit-msg]
 
       - id: check-pins
         name: devtools pin agreement

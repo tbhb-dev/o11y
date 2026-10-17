@@ -14,7 +14,3 @@ apm.lock.yaml rebase-resolve=regenerate
 
 # Written by the skill token tooling; re-running it is the answer.
 **/skills/*/tokens.json rebase-resolve=regenerate
-
-# The codex port of resolve-rebase-conflicts shows the conflict marker
-# shape the same way the claude skill does.
-**/skills/codex-resolve-rebase-conflicts/SKILL.md conflict-markers=documented

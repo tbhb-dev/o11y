@@ -1,7 +1,7 @@
 # Copy to mise.local.toml, fill in, and never commit the copy. The values
 # below are placeholders only; real host names, addresses and paths belong
-# in the gitignored mise.local.toml. tools/check-leaks.sh reads the real
-# values from there and fails a commit or push that carries one.
+# in the gitignored mise.local.toml. The shared leak gate reads the literal
+# list in O11Y_PRIVATE_STRINGS and blocks commits or pushes that carry them.
 [env]
 O11Y_SSH_HOST = "nas.example.invalid"
 O11Y_REMOTE_DIR = "/srv/o11y"
@@ -10,12 +10,15 @@ O11Y_REMOTE_COMPOSE = "/usr/bin/docker-compose"
 O11Y_REMOTE_TAILSCALE = "/usr/bin/tailscale"
 O11Y_TAILNET_DOMAIN = "example.ts.net"
 O11Y_NODE_ADDR = "192.0.2.10"
-# Comma-separated extra strings to keep out of the repository, such as other
-# host names or a model identifier. May be empty.
+# Comma-separated plain literals to keep out of the repository. List private
+# host names, logins, addresses, deployment and executable paths, tailnet
+# domains and their private labels, site-specific cluster names, and model
+# identifiers explicitly. The gate does not derive these from other variables
+# or recorded host names. Entries must have at least four characters and no
+# commas. Keep this list local; do not put real values in this template.
 O11Y_PRIVATE_STRINGS = ""
 # The cluster label on the stack's self-metrics. Leave it unset for the
-# default, o11y; a site name set here is private and the leak check treats it
-# that way.
+# default, o11y. If it names a private site, list that literal above too.
 # O11Y_CLUSTER = ""
 # GiB that preflight, gate-test and deploy require free under O11Y_REMOTE_DIR,
 # on top of 10 percent of the filesystem. Not private.

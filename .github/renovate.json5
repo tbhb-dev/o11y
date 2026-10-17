@@ -15,7 +15,7 @@
   prConcurrentLimit: 0,
   prHourlyLimit: 0,
   extends: [
-    "github>tbhb-dev/devtools//.github/renovate-config.json5#d80265aa04fd10bbfe3965200ddbe3d5d1563c38", // v0.10.0
+    "github>tbhb-dev/devtools//.github/renovate-config.json5#902790ab90cb5e018d22c54ea4bb12711f632253", // v0.11.0
   ],
 
   packageRules: [

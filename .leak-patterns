@@ -1,0 +1,4 @@
+# Match NAS roots and their descendants without matching longer directory names.
+/(volume[0-9]+|var/services|var/packages)([^a-z0-9_-]|$)
+# Match the Tailscale ULA IPv6 prefix without matching this rule itself.
+[f]d7a:115c:a1e0

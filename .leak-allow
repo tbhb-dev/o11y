@@ -1,0 +1,6 @@
+# Vendored and deployed files skip patterns, but never private literals.
+^\.claude/
+^\.agents/
+^\.devtools/
+^\.config/mise/conf\.d/
+^\.vale/
