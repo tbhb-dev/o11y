@@ -184,10 +184,24 @@ services:
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
       GF_PATHS_PROVISIONING: /etc/o11y-grafana/provisioning
+      # Email alerts, which render.sh turns on only with a recipient. The
+      # password is read from its file and is empty while email is off.
+      GF_SMTP_ENABLED: ${O11Y_ALERT_SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${O11Y_ALERT_SMTP_HOST:-}:${O11Y_ALERT_SMTP_PORT:-}
+      GF_SMTP_USER: ${O11Y_ALERT_SMTP_USER:-}
+      GF_SMTP_PASSWORD__FILE: /run/o11y/alert_smtp_password
+      GF_SMTP_FROM_ADDRESS: ${O11Y_ALERT_SMTP_FROM:-}
+      GF_SMTP_FROM_NAME: o11y
+      GF_SMTP_STARTTLS_POLICY: MandatoryStartTLS
+      GF_SMTP_SKIP_VERIFY: ${O11Y_ALERT_SMTP_SKIP_VERIFY:-false}
+      O11Y_ALERT_EMAIL_TO: ${O11Y_ALERT_EMAIL_TO:-}
     volumes:
       - ${O11Y_CONFIG_GRAFANA:?}:/etc/o11y-grafana:ro
       - ${O11Y_DATA_DIR:?}/grafana:/var/lib/grafana
       - ${O11Y_DATA_DIR:?}/secrets/grafana_admin_password:/run/o11y/grafana_admin_password:ro
+      # Read by the contact point in provisioning/alerting/alerting.yaml.
+      - ${O11Y_DATA_DIR:?}/secrets/alert_discord_webhook_url:/run/o11y/alert_discord_webhook_url:ro
+      - ${O11Y_DATA_DIR:?}/secrets/alert_smtp_password:/run/o11y/alert_smtp_password:ro
     ports:
       - "127.0.0.1:${O11Y_GRAFANA_PORT:-3000}:3000"
     mem_limit: 768m

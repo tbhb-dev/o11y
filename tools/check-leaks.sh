@@ -158,6 +158,24 @@ if [[ -n ${O11Y_CLUSTER-} && $O11Y_CLUSTER != o11y ]]; then
   add_needle O11Y_CLUSTER "$O11Y_CLUSTER"
 fi
 
+# The 1Password references of the alert secrets, set only where deploy
+# runs, and each item name on its own. The vault and field names stay out:
+# the vault shares its name with the public GitHub organization, and the
+# field's is a generic word.
+for name in O11Y_ALERT_DISCORD_WEBHOOK_REF O11Y_ALERT_SMTP_PASSWORD_REF; do
+  if [[ -n ${!name-} ]]; then
+    add_needle "$name" "${!name}"
+    item=${!name#*://*/}
+    add_needle "$name (item)" "${item%%/*}"
+  fi
+done
+
+# The email addresses of the alert settings. They are unset where email is
+# off, so none is noted as missing.
+for name in O11Y_ALERT_EMAIL_TO O11Y_ALERT_SMTP_USER O11Y_ALERT_SMTP_FROM; do
+  add_needle "$name" "${!name-}"
+done
+
 # The list may be empty. An empty list is a valid choice, not a gap.
 IFS=',' read -r -a entries <<<"${O11Y_PRIVATE_STRINGS-}"
 index=0

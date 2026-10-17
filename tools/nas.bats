@@ -108,6 +108,21 @@ STUB
   # The deploy host's own name; STUB_HOST_NAME_BAD makes it one that isn't.
   stub "$dir/bin/hostname" <<<'[ "$1" = -s ] || exit 1; if [ -n "${STUB_HOST_NAME_BAD:-}" ]; then echo "bad name;id"; else echo nas-node-01; fi'
   stub "$dir/bin/getent" <<<'echo "192.0.2.20 STREAM otlp.example.ts.net"'
+  # 1Password: the webhook URL or the SMTP password, for the reference
+  # deploy names. STUB_OP_LOCKED fails the way a locked 1Password does,
+  # naming the reference.
+  stub "$dir/bin/op" <<'STUB'
+printf '%s\n' "$*" >>"$STUB/op.log"
+if [ -n "${STUB_OP_LOCKED:-}" ]; then
+  echo "[ERROR] could not read secret '$3': account is not signed in" >&2
+  exit 1
+fi
+case $3 in
+"$O11Y_ALERT_DISCORD_WEBHOOK_REF") printf '%s' https://discord.com/api/webhooks/123/NasSentinelWebhookToken ;;
+"$O11Y_ALERT_SMTP_PASSWORD_REF") printf '%s' NasSentinelSmtpPassword ;;
+*) exit 1 ;;
+esac
+STUB
   # This machine's curl, which smoke-remote asks for the anonymous home.
   stub "$dir/bin/curl" <<'STUB'
 printf '%s\n' "$*" >>"$STUB/curl.log"
@@ -206,6 +221,13 @@ exec)
 inspect) cat "$O11Y_REMOTE_DIR/data/secrets/s3.env" ;;
 run)
   case $all in
+  *alert_discord_webhook_url*)
+    # The webhook write: its stdin, kept for the test. STUB_WEBHOOK_REFUSED
+    # makes the host refuse the URL.
+    cat >"$STUB/webhook.stdin"
+    [ -z "${STUB_WEBHOOK_REFUSED:-}" ] || exit 1
+    ;;
+  *alert_smtp_password*) cat >"$STUB/smtp.stdin" ;;
   *"stat -c"*)
     cat "$STUB/layout"
     # STUB_LAYOUT_THEN_FAILS lists the layout, then fails, as a dropped
@@ -362,6 +384,10 @@ STUB
   export O11Y_REMOTE_DOCKER=$host/bin/docker O11Y_REMOTE_COMPOSE=$host/bin/docker-compose
   export O11Y_REMOTE_TAILSCALE=$host/bin/tailscale O11Y_TAILNET_DOMAIN=example.ts.net
   export O11Y_NODE_ADDR=192.0.2.10 O11Y_PRIVATE_STRINGS=
+  # A made-up reference, split so the leak check's pattern for real ones
+  # doesn't match this source.
+  export O11Y_ALERT_DISCORD_WEBHOOK_REF='op:''//wombat-vault/Quokka alerts item/credential'
+  unset O11Y_ALERT_EMAIL_TO O11Y_ALERT_SMTP_HOST O11Y_ALERT_SMTP_PORT O11Y_ALERT_SMTP_USER O11Y_ALERT_SMTP_FROM O11Y_ALERT_SMTP_PASSWORD_REF
   unset O11Y_CONFIRM O11Y_DISK_RESERVE_GB O11Y_GRAFANA_PORT O11Y_OTLP_GRPC_PORT O11Y_OTLP_HTTP_PORT O11Y_SECRETS_OWNER
   changing=(stage gate-test gate-clean deploy rollback down serve-apply serve-clear)
   sentinel=NasSentinelSecretNotARealSecret000000000
@@ -422,6 +448,8 @@ mimir 0:0 750
 rustfs 10001:10001 750
 secrets 0:0 755
 tempo 10001:10001 750
+secrets/alert_discord_webhook_url 472:472 400 34
+secrets/alert_smtp_password 472:472 400 0
 secrets/grafana_admin_password 472:472 400 33
 secrets/rustfs.access_key 10001:10001 400 21
 secrets/rustfs.secret_key 10001:10001 400 41
@@ -627,6 +655,95 @@ everything() {
   # The gate asked for the readiness of all six, not only what changed.
   for port in 9000 3100 3200 8080 12345 3000; do
     recorded ":$port/"
+  done
+}
+
+@test "deploy pipes the webhook URL from op to the host on stdin, after init and before up" {
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  id=$(staged)
+  release=$remote/releases/$id
+  in_order "-p o11y --env-file $release/.env -f $release/compose.init.yaml run --rm -T init" \
+    "run --rm -i --log-driver none --user 0:0 --network none --entrypoint /bin/sh -v $remote/data:/d " \
+    "-p o11y --env-file $release/.env -f $release/compose.yaml up -d"
+  [ "$(cat "$dir/op.log")" = "read --no-newline $O11Y_ALERT_DISCORD_WEBHOOK_REF" ]
+  [ "$(cat "$dir/webhook.stdin")" = https://discord.com/api/webhooks/123/NasSentinelWebhookToken ]
+  # On stdin only: no command line, log or output holds it.
+  ! grep -rqF NasSentinelWebhookToken "$dir/ssh.log" "$dir/sudo.log" "$dir/output" "$repo/tmp" || false
+  # Email is off, so no SMTP password is asked for or written.
+  [ ! -e "$dir/smtp.stdin" ]
+  ! grep -q 'O11Y_ALERT_SMTP' "$remote/releases/$id/.env" || false
+}
+
+set_email() {
+  export O11Y_ALERT_EMAIL_TO=to@example.invalid O11Y_ALERT_SMTP_HOST=smtp.example.invalid O11Y_ALERT_SMTP_PORT=587
+  export O11Y_ALERT_SMTP_USER=user@example.invalid O11Y_ALERT_SMTP_FROM=from@example.invalid
+  export O11Y_ALERT_SMTP_PASSWORD_REF='op:''//wombat-vault/Numbat smtp item/password'
+}
+
+@test "with email on, deploy pipes the SMTP password to the host as well, and the release carries the SMTP settings" {
+  set_email
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  id=$(staged)
+  release=$remote/releases/$id
+  in_order "-p o11y --env-file $release/.env -f $release/compose.init.yaml run --rm -T init" \
+    "-v $remote/data:/d " \
+    "-v $remote/data:/d " \
+    "-p o11y --env-file $release/.env -f $release/compose.yaml up -d"
+  [ "$(cat "$dir/op.log")" = "read --no-newline $O11Y_ALERT_DISCORD_WEBHOOK_REF
+read --no-newline $O11Y_ALERT_SMTP_PASSWORD_REF" ]
+  [ "$(cat "$dir/smtp.stdin")" = NasSentinelSmtpPassword ]
+  ! grep -rqF NasSentinelSmtpPassword "$dir/ssh.log" "$dir/sudo.log" "$dir/output" "$repo/tmp" || false
+  grep -qx O11Y_ALERT_SMTP_ENABLED=true "$release/.env"
+  grep -qx O11Y_ALERT_EMAIL_TO=to@example.invalid "$release/.env"
+  grep -qx O11Y_ALERT_SMTP_PORT=587 "$release/.env"
+  # The addresses and the references reach the operator only as names.
+  ! grep -qF -e '@example.invalid' -e 'Numbat smtp item' "$dir/output" || false
+}
+
+@test "with a recipient and an empty SMTP password reference, deploy warns, renders no email receiver and asks op only for the webhook" {
+  set_email
+  export O11Y_ALERT_SMTP_PASSWORD_REF=
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARN deploy: O11Y_ALERT_SMTP_PASSWORD_REF is empty, so the release has no email receiver"* ]] || false
+  id=$(staged)
+  ! grep -q '^O11Y_ALERT_' "$remote/releases/$id/.env" || false
+  ! grep -rq 'o11y-email' "$remote"/config/grafana-*/provisioning/alerting/ || false
+  [ "$(cat "$dir/op.log")" = "read --no-newline $O11Y_ALERT_DISCORD_WEBHOOK_REF" ]
+  [ ! -e "$dir/smtp.stdin" ]
+  [ "$(readlink "$remote/current")" = "releases/$id" ]
+}
+
+@test "with every reference empty, deploy warns, calls op for nothing, writes no secret and still promotes" {
+  export O11Y_ALERT_DISCORD_WEBHOOK_REF=
+  healthy o11y
+  go deploy
+  [ "$status" -eq 0 ]
+  [[ $output == *"WARN deploy: O11Y_ALERT_DISCORD_WEBHOOK_REF is empty, so no Discord webhook URL was sent"* ]] || false
+  [ ! -e "$dir/op.log" ]
+  ! recorded alert_discord_webhook_url || false
+  [ ! -e "$dir/webhook.stdin" ]
+  [ "$(readlink "$remote/current")" = "releases/$(staged)" ]
+}
+
+@test "a locked 1Password or a refused URL stops deploy before up and promotes nothing" {
+  local fail
+  for fail in STUB_OP_LOCKED STUB_WEBHOOK_REFUSED; do
+    healthy o11y
+    rm -f "$dir/ssh.log"
+    env "$fail=1" O11Y_CONFIRM=deploy bash "$repo/tools/nas.sh" deploy >"$dir/out" 2>&1 && return 1
+    grep -qF "FAIL deploy: the Discord webhook URL could not be read from 1Password, or the host refused it as not a Discord webhook URL" "$dir/out"
+    grep -qF "was not promoted" "$dir/out"
+    ! grep -q 'compose.yaml up -d' "$dir/ssh.log" || false
+    [ ! -e "$remote/current" ]
+    [ ! -e "$remote/.deploy.lock" ]
+    # op names the reference in its error; the operator sees the placeholder.
+    ! grep -qF 'Quokka alerts item' "$dir/out" || false
   done
 }
 
@@ -1068,8 +1185,8 @@ $t serve status" ]
   [[ $output == *"grafana 127.0.0.1:3000 -> 3000"* ]] || false
   [[ $output == *"alloy 127.0.0.1:4317 -> 4317"* ]] || false
   [[ $output == *"O11Y_DATA_DIR=$remote/data"* ]] || false
-  [[ $output == *"compose.init.yaml run --rm -T init"* ]] || false
-  [[ $output == *"compose.yaml up -d --remove-orphans"* ]] || false
+  [[ $output == *"compose.init.yaml run --rm -T init"*"op read \$O11Y_ALERT_DISCORD_WEBHOOK_REF | "*" run --rm -i "*"alert_discord_webhook_url"*"compose.yaml up -d --remove-orphans"* ]] || false
+  [[ $output != *"Quokka alerts item"* ]] || false
   [[ $output == *"mv -T current.new current"*"exec <grafana container> cat /run/o11y/grafana_admin_password | sed "*" -X PUT "*"'{\"homeDashboardUID\":\"o11y-stack-health\"}' http://grafana:3000/api/org/preferences"* ]] || false
 }
 
@@ -1329,11 +1446,12 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
   ! grep -qv -e "^-n $O11Y_REMOTE_DOCKER " -e "^-n $O11Y_REMOTE_COMPOSE " "$dir/sudo.log" || false
   ! grep -F "$O11Y_REMOTE_TAILSCALE" "$dir/sudo.log" || false
   runs=$(grep -F "$O11Y_REMOTE_DOCKER run " "$dir/ssh.log")
-  # Eight version checks, the layout listing, Loki's emptying, gate-clean.
-  [ "$(wc -l <<<"$runs")" -eq 11 ]
+  # Eight version checks, the layout listing, Loki's emptying, gate-clean,
+  # and the webhook write of each of the two deploys.
+  [ "$(wc -l <<<"$runs")" -eq 13 ]
   ! grep -qv -e '--entrypoint ' <<<"$runs" || false
   ! grep -e '--entrypoint /bin/sh' <<<"$runs" | grep -qv -e '--user 0:0 ' || false
-  [ "$(grep -c -e '--entrypoint /bin/sh' <<<"$runs")" -eq 3 ]
+  [ "$(grep -c -e '--entrypoint /bin/sh' <<<"$runs")" -eq 5 ]
 }
 
 @test "no task reads a generated secret, prints a model or an environment, or lets the S3 key into its output" {
@@ -1366,7 +1484,8 @@ sudo -n $O11Y_REMOTE_COMPOSE" ]
 
 @test "no task removes anything under releases, config or data" {
   everything
-  kept=$(removals | grep -v -e " rm -sf " -e "$remote/gate")
+  # An alert secret's write removes only its own temporary file.
+  kept=$(removals | grep -v -e " rm -sf " -e "$remote/gate" -e "; t=/d/secrets/\.tmp\.alert_[a-z_]*; .* || { rm -f \$t; exit 1; }'$")
   ! grep -v -e "^mkdir -p $remote/config $remote/releases && rm -rf $remote/config/.incoming-\* $remote/releases/.incoming-\*$" \
     -e "^rmdir $remote/.deploy.lock$" <<<"$kept" || false
   [ -n "$kept" ]

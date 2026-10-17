@@ -20,3 +20,21 @@ O11Y_PRIVATE_STRINGS = ""
 # GiB that preflight, gate-test and deploy require free under O11Y_REMOTE_DIR,
 # on top of 10 percent of the filesystem. Not private.
 # O11Y_DISK_RESERVE_GB = "50"
+# The 1Password secret reference whose value is the Discord webhook URL for
+# alerts, in the form `op read` takes. deploy pipes the URL from `op read`
+# to the host, so it never sits in a file or variable here. Left empty,
+# deploy warns and sends no URL. Private: the leak check treats the reference
+# and its item name that way.
+O11Y_ALERT_DISCORD_WEBHOOK_REF = ""
+# Email alerts, off while O11Y_ALERT_EMAIL_TO is empty. With a recipient,
+# the SMTP host, port, login and sender must be set too, and deploy pipes the
+# SMTP password from `op read` of O11Y_ALERT_SMTP_PASSWORD_REF to the host.
+# With that reference empty, the release has no email receiver and stage
+# warns. Grafana requires STARTTLS. The addresses, the login and the reference are
+# private, and the leak check treats them that way.
+O11Y_ALERT_EMAIL_TO = ""
+# O11Y_ALERT_SMTP_HOST = "smtp.example.invalid"
+# O11Y_ALERT_SMTP_PORT = "587"
+# O11Y_ALERT_SMTP_USER = "alerts@example.invalid"
+# O11Y_ALERT_SMTP_FROM = "alerts@example.invalid"
+# O11Y_ALERT_SMTP_PASSWORD_REF = ""

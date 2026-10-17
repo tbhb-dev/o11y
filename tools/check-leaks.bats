@@ -139,6 +139,46 @@ run_check() {
   [ "$status" -eq 0 ]
 }
 
+@test "the webhook's 1Password reference and its item name are private literals" {
+  export O11Y_ALERT_DISCORD_WEBHOOK_REF="op:/${op_slashes}wombat-vault/Quokka alerts item/credential"
+  printf 'the item is Quokka alerts item\n' >leak.md
+  git add leak.md
+  run_check
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.md:1: private literal O11Y_ALERT_DISCORD_WEBHOOK_REF (item)"* ]]
+  no_value 'Quokka alerts item'
+  printf 'ref %s\n' "$O11Y_ALERT_DISCORD_WEBHOOK_REF" >leak.md
+  git add leak.md
+  run_check
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.md:1: private literal O11Y_ALERT_DISCORD_WEBHOOK_REF"* ]]
+  no_value wombat-vault
+}
+
+@test "the SMTP password's reference, its item name and the alert email addresses are private literals" {
+  export O11Y_ALERT_SMTP_PASSWORD_REF="op:/${op_slashes}wombat-vault/Numbat smtp item/password"
+  export O11Y_ALERT_EMAIL_TO=numbat-to@example.invalid O11Y_ALERT_SMTP_USER=numbat-user@example.invalid O11Y_ALERT_SMTP_FROM=numbat-from@example.invalid
+  local value name
+  for value in 'Numbat smtp item' numbat-to@example.invalid numbat-user@example.invalid numbat-from@example.invalid; do
+    printf 'value %s\n' "$value" >leak.md
+    git add leak.md
+    run_check
+    [ "$status" -eq 1 ]
+    no_value "$value"
+  done
+  printf 'ref %s\n' "$O11Y_ALERT_SMTP_PASSWORD_REF" >leak.md
+  git add leak.md
+  run_check
+  [ "$status" -eq 1 ]
+  [[ $output == *"leak.md:1: private literal O11Y_ALERT_SMTP_PASSWORD_REF"* ]]
+  for name in O11Y_ALERT_EMAIL_TO O11Y_ALERT_SMTP_USER O11Y_ALERT_SMTP_FROM; do
+    printf 'address %s\n' "${!name}" >leak.md
+    git add leak.md
+    run_check
+    [[ $output == *"leak.md:1: private literal $name"* ]]
+  done
+}
+
 @test "the first label of the tailnet domain is checked on its own" {
   echo "ssh quokka-pond" >leak.md
   git add leak.md

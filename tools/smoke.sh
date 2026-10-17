@@ -4,9 +4,13 @@
 # it stores and returns telemetry through RustFS. One `ok` line per group;
 # everything it created is removed on exit, pass or fail.
 #
-# The run seeds known sentinel values as the S3 key and the Grafana password
-# and ends by searching everything it rendered, logged, ran or printed for
-# them, so a secret that leaks into any of those fails the test.
+# The run seeds known sentinel values as the S3 key, the Grafana password,
+# the Discord webhook URL and the SMTP password, and searches everything it
+# rendered, logged, ran or printed for them, so a secret that leaks into any
+# of those fails the test. The webhook URL points at a stub that records
+# what Grafana sends, email goes to a stub SMTP server that accepts only the
+# sentinel password, and the disk reserve is far above any disk, so the disk
+# alert fires for real on both.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -27,6 +31,11 @@ O11Y_DATA_DIR=$(test_data_dir smoke)
 export O11Y_DATA_DIR O11Y_GRAFANA_ROOT_URL=$grafana/
 export O11Y_GRAFANA_PORT=13000 O11Y_OTLP_GRPC_PORT=14317 O11Y_OTLP_HTTP_PORT=14318
 export O11Y_ENVIRONMENT=smoke O11Y_HOST_NAME=smoke-host
+export O11Y_DISK_RESERVE_GB=999999
+# The stub SMTP server in compose.tools.yaml. Its certificate is its own, so
+# only here does Grafana skip verifying it.
+export O11Y_ALERT_EMAIL_TO=smoke-to@example.invalid O11Y_ALERT_SMTP_HOST=alert-mail O11Y_ALERT_SMTP_PORT=1025
+export O11Y_ALERT_SMTP_USER=smoke-user O11Y_ALERT_SMTP_FROM=smoke-from@example.invalid O11Y_ALERT_SMTP_SKIP_VERIFY=true
 # Compose itself reads s3.env, so the invoking user has to own it.
 # shellcheck disable=SC2312 # id doesn't fail
 O11Y_SECRETS_OWNER=$(id -u):$(id -g)
@@ -40,6 +49,10 @@ main() {
   dc -f "$release/compose.yaml" "$@"
 }
 
+tools_dc() {
+  dc -f "$release/compose.yaml" -f "$release/compose.tools.yaml" --profile tools "$@"
+}
+
 s3probe() {
   dc -f "$release/compose.yaml" -f "$release/compose.tools.yaml" run --rm -T s3probe "$@"
 }
@@ -49,6 +62,10 @@ s3probe() {
 sentinel_access=SENTINEL000000000000
 sentinel_secret=SmokeSentinelSecretKeyNotARealSecret0000
 sentinel_password=SmokeSentinelAdminPasswordNoReal
+sentinel_webhook_token=SmokeSentinelWebhookToken
+sentinel_webhook=http://alert-stub:8080/cgi-bin/hook/12345/$sentinel_webhook_token
+# compose.tools.yaml holds its bcrypt hash, never the password.
+sentinel_smtp_password=SmokeSentinelSmtpPassword
 
 # The init file shares the project with the stack, whose containers Compose
 # would otherwise report as orphans on every run.
@@ -150,10 +167,16 @@ seed() {
 truncate_secret() {
   util "rm -f /d/secrets/$1 && : >/d/secrets/$1"
 }
+# Deploy writes the alert secrets with no line end, so these seeds have none.
+seed_alert() {
+  util "rm -f /d/secrets/$1 && printf '%s' '$2' >/d/secrets/$1"
+}
 seeded() {
   util "[ \"\$(cat /d/secrets/rustfs.access_key)\" = '$sentinel_access' ] &&
     [ \"\$(cat /d/secrets/rustfs.secret_key)\" = '$sentinel_secret' ] &&
-    [ \"\$(cat /d/secrets/grafana_admin_password)\" = '$sentinel_password' ]"
+    [ \"\$(cat /d/secrets/grafana_admin_password)\" = '$sentinel_password' ] &&
+    [ \"\$(cat /d/secrets/alert_discord_webhook_url)\" = '$sentinel_webhook' ] &&
+    [ \"\$(cat /d/secrets/alert_smtp_password)\" = '$sentinel_smtp_password' ]"
 }
 # s3.env must be exactly what the two key files say.
 consistent() {
@@ -164,12 +187,23 @@ AWS_SECRET_ACCESS_KEY=$(cat rustfs.secret_key)" ]'
 # Owners, modes, times and checksums of the secrets; compared, never printed.
 fingerprint() {
   util "cd /d && { ls -A secrets; stat -c '%n %u:%g %a' * secrets/s3.env;
-    stat -c '%n %u:%g %a %Y' secrets/rustfs.* secrets/grafana_admin_password; sha256sum secrets/*; } | sha256sum"
+    stat -c '%n %u:%g %a %Y' secrets/rustfs.* secrets/grafana_admin_password secrets/alert_*
+    sha256sum secrets/*; } | sha256sum"
 }
 seed rustfs.access_key "$sentinel_access"
 seed rustfs.secret_key "$sentinel_secret"
 seed grafana_admin_password "$sentinel_password"
+# With no alert secrets, init writes placeholders Grafana can read.
+util 'rm -f /d/secrets/alert_*'
 init || die "1: init failed"
+# shellcheck disable=SC2016 # the container's shell expands it
+output_is "http://127.0.0.1:9/o11y-no-webhook 472:472 400" util 'cat /d/secrets/alert_discord_webhook_url; echo " $(stat -c "%u:%g %a" /d/secrets/alert_discord_webhook_url)"' ||
+  die "1: init did not write the webhook placeholder, owned by Grafana and readable by it alone"
+output_is "alert_smtp_password 472:472 400 0" util 'cd /d/secrets && stat -c "%n %u:%g %a %s" alert_smtp_password' ||
+  die "1: init did not write an empty SMTP password, owned by Grafana and readable by it alone"
+seed_alert alert_discord_webhook_url "$sentinel_webhook"
+seed_alert alert_smtp_password "$sentinel_smtp_password"
+init || die "1: init failed after the alert secrets were seeded"
 seeded || die "1: init replaced a valid existing secret"
 consistent || die "1: s3.env does not match the key files"
 expected="alloy 0:0 750
@@ -179,6 +213,8 @@ mimir 0:0 750
 rustfs 10001:10001 750
 secrets 0:0 755
 tempo 10001:10001 750
+secrets/alert_discord_webhook_url 472:472 400 ${#sentinel_webhook}
+secrets/alert_smtp_password 472:472 400 ${#sentinel_smtp_password}
 secrets/grafana_admin_password 472:472 400 33
 secrets/rustfs.access_key 10001:10001 400 21
 secrets/rustfs.secret_key 10001:10001 400 41
@@ -200,12 +236,17 @@ consistent || die "1: s3.env does not match the regenerated key"
 ! seeded || die "1: a truncated key was left in place"
 seed rustfs.access_key "$sentinel_access"
 { init && seeded && consistent; } || die "1: the sentinel key could not be restored"
-ok "1: init creates the layout and secrets, keeps valid ones, and completes an interrupted or truncated first run"
+ok "1: init creates the layout, secrets and alert placeholders, keeps valid ones, and completes an interrupted or truncated first run"
 
 # 2. Start, buckets, credentials.
 main up -d >"$out/up.log" 2>&1 || {
   cat "$out/up.log"
   die "2: up failed"
+}
+# Grafana's contact point posts and mails here; see group 12.
+tools_dc up -d alert-stub alert-mail >"$out/up.log" 2>&1 || {
+  cat "$out/up.log"
+  die "2: the webhook and SMTP stubs could not be started"
 }
 bucket_log() {
   tr -d '\r' | grep '^bucket ' | sort | tr '\n' ';'
@@ -289,6 +330,19 @@ sources=$(curl -fs -m 15 "$grafana/api/datasources" | jq -c '[.[].uid] | sort') 
   die "4: the provisioned datasources are not the expected three"
 provisioned=$(curl -fs -m 15 "$grafana/api/dashboards/uid/o11y-stack-health" | jq -r '.meta.provisioned') && [[ $provisioned == true ]] ||
   die "4: the provisioned dashboard is missing"
+# The webhook URL is a secret: an anonymous Editor sees the contact point
+# with the URL redacted, and may not export it decrypted. Email is its
+# second receiver, to the recipient the environment names.
+points=$(curl -fsS -m 15 "$grafana/api/v1/provisioning/contact-points") || die "4: the contact points could not be read"
+jq -e 'length == 2 and all(.[]; .name == "o11y-stack" and .provenance == "file")
+  and (map(select(.uid == "o11y-discord" and .type == "discord" and .settings.url == "[REDACTED]")) | length) == 1
+  and (map(select(.uid == "o11y-email" and .type == "email" and .settings.addresses == "smoke-to@example.invalid")) | length) == 1' \
+  <<<"$points" >/dev/null || die "4: the provisioned contact point lacks its Discord or email receiver, or shows its webhook URL"
+expect_status 403 "$grafana/api/v1/provisioning/contact-points/export?decrypt=true" ||
+  die "4: an anonymous user can export the contact point with its webhook URL"
+rules=$(curl -fsS -m 15 "$grafana/api/v1/provisioning/alert-rules" | jq -c '[.[].uid] | sort') &&
+  [[ $rules == '["o11y-alloy-export","o11y-disk-low","o11y-ingest-dropped","o11y-log-rate","o11y-rustfs-memory","o11y-service-down"]' ]] ||
+  die "4: the provisioned alert rules are not the expected six"
 # The call deploy makes on every run (home_cmd in tools/nas.sh), until the
 # Grafana pin has the fix for grafana/grafana#131876.
 printf 'user = "admin:%s"\n' "$sentinel_password" | output_is 200 grafana_status -K - -X PUT -H 'Content-Type: application/json' \
@@ -311,7 +365,7 @@ case $status in
 1) die "4: the Grafana log has a provisioning error" ;;
 *) die "4: the Grafana log's provisioning lines could not be searched" ;;
 esac
-ok "4: anonymous Editor can save dashboards but not datasources, only the generated admin password works, the home dashboard is set, provisioning is clean"
+ok "4: anonymous Editor can save dashboards but not datasources or see the webhook URL, only the generated admin password works, the home dashboard is set, the six alert rules and provisioning are clean"
 
 # 5. Exact receipt of one trace, log and metric over OTLP/HTTP, plus one
 # trace over gRPC. Both go through the published ports. A container reaches
@@ -391,6 +445,29 @@ while read -r job limit; do
 done <<<"$limits"
 ok "7: up is 1 for exactly the five o11y/* jobs, each labelled and below its sample_limit"
 
+# evaluate <rule uid> [threshold]: the rule's queries as Grafana provisioned
+# them, evaluated now with its `for` ignored, and with the threshold in place
+# of the rule's own when one is given. Sets evaluated to one {labels, value}
+# per series of the condition, value 1 where it holds, and to none when the
+# query has no data. Fails when Grafana or the datasource does not answer.
+evaluated=
+evaluate() {
+  local rule request body condition
+  rule=$(curl -fsS -m 15 "$grafana/api/v1/provisioning/alert-rules/$1") || return 1
+  condition=$(jq -er .condition <<<"$rule") || return 1
+  request=$(jq -c --arg t "${2:-}" '.condition as $c | {condition: $c, data: [.data[] |
+    if $t != "" and .refId == $c then .model.conditions[0].evaluator.params[0] = ($t | tonumber) else . end]}' <<<"$rule") || return 1
+  body=$(curl -fsS -m 30 -X POST -H 'Content-Type: application/json' -d "$request" "$grafana/api/v1/eval") || return 1
+  evaluated=$(jq -ce --arg c "$condition" '[.results[$c] | select(.status == 200) | .frames[] |
+    (.schema.fields | map(.type) | index("number")) as $i | select($i != null) |
+    {labels: (.schema.fields[$i].labels // {}), value: .data.values[$i][0]}]' <<<"$body")
+}
+# fires_for <rule uid> <label> <values as JSON> [threshold]: the label's
+# values on the series where the condition holds are exactly these.
+fires_for() {
+  evaluate "$1" "${4:-}" && jq -e --arg l "$2" --argjson want "$3" '[.[] | select(.value == 1) | .labels[$l]] | sort == $want' <<<"$evaluated" >/dev/null
+}
+
 # panel_query <title>: a dashboard panel's query, as Grafana provisioned it,
 # run as the instant query the panel makes. Sets panel to the values it
 # returns, and fails when Grafana or Mimir does not answer, so no caller
@@ -423,8 +500,11 @@ tempo_failed() {
     panel_query "Restarts in 1h: o11y/tempo" && [[ $panel == '[]' ]] &&
     panel_query "Tempo refused and discarded spans" && [[ $panel == '[]' ]]
 }
+fires_for o11y-service-down job '[]' || die "7: the service-down rule fires with every service up"
+jq -e 'length == 6' <<<"$evaluated" >/dev/null || die "7: the service-down rule does not cover the six jobs"
 main stop tempo >/dev/null 2>&1 || die "7: tempo could not be stopped"
 poll 120 tempo_failed || die "7: with Tempo stopped, a panel does not show it down or unavailable"
+poll 60 fires_for o11y-service-down job '["o11y/tempo"]' || die "7: with Tempo stopped, the service-down rule does not fire for it alone"
 main start tempo >/dev/null 2>&1 || die "7: tempo could not be started again"
 wait_ready tempo
 # With Alloy stopped and Mimir still answering, nothing new is written, the
@@ -443,7 +523,7 @@ poll 180 stale || die "7: with Alloy stopped, a panel still shows a job as up or
 main start alloy >/dev/null 2>&1 || die "7: alloy could not be started again"
 wait_ready alloy
 poll 180 all_up || die "7: the five jobs are not up again once Tempo and Alloy are back"
-ok "7: a stopped Tempo reads Down with no error count, and a stopped Alloy turns every status panel Unavailable or Stale"
+ok "7: a stopped Tempo reads Down with no error count and trips the service-down rule, and a stopped Alloy turns every status panel Unavailable or Stale"
 
 # RustFS pushes its metrics to Alloy's unpublished self receiver. They
 # arrive as job o11y/rustfs with the stack's identity, only under the
@@ -550,7 +630,7 @@ O11Y_S3_ENV_FILE=${O11Y_S3_ENV_FILE:-$O11Y_DATA_DIR/secrets/s3.env} tools/valida
 exec 1>&3 2>&4 3>&- 4>&-
 poll 10 test -s "$out/transcript.status" || die "10: the transcript was never finished"
 [[ $(<"$out/transcript.status") == 0 ]] || die "10: the transcript could not be written in full"
-for sentinel in "$sentinel_access" "$sentinel_secret" "$sentinel_password"; do
+for sentinel in "$sentinel_access" "$sentinel_secret" "$sentinel_password" "$sentinel_webhook_token" "$sentinel_smtp_password"; do
   sentinel_absent "$sentinel" "the rendered release=$out/release" "the rendered release=$out/again" \
     "the rendered source copy=$out/src" "the rendered config=$out/config" \
     "a container log=$out/containers.log" "a process argument=$out/processes.log" \
@@ -623,3 +703,59 @@ poll 60 delta_after_restart || die "11: after a restart Mimir holds delta $seen_
 after=$(discarded) || die "11: Mimir's discarded samples could not be read"
 [[ $after == "$before" ]] || die "11: Mimir discarded $((after - before)) samples as otlp_parse_error after Alloy restarted"
 ok "11: two delta points arrive in Mimir as one cumulative series at their sum, a cumulative point as itself, a restarted Alloy starts the series again, and Mimir discards none"
+
+# 12. Alerts. Each rule's condition, evaluated the way Grafana evaluates it
+# and with its pending period ignored, holds for what it watches and for
+# nothing else. One alert goes all the way: the disk rule fires for real
+# against the reserve this run renders, the webhook stub receives Grafana's
+# message at the seeded URL, whole, and the SMTP stub receives the email,
+# which it accepts only with the seeded password.
+health=$(curl -fsS -m 15 "$grafana/api/prometheus/grafana/api/v1/rules" |
+  jq -c '[.data.groups[].rules[] | {(.name): .health}] | add') || die "12: Grafana's rule states could not be read"
+jq -e 'length == 6 and all(.[]; . == "ok")' <<<"$health" >/dev/null || die "12: a rule did not evaluate cleanly: $health"
+fires_for o11y-disk-low job '["o11y/rustfs"]' || die "12: the disk rule does not fire below the reserve"
+fires_for o11y-rustfs-memory job '[]' || die "12: the RustFS memory rule fires on an idle stack"
+jq -e 'length == 1' <<<"$evaluated" >/dev/null || die "12: the RustFS memory rule reads no memory for RustFS"
+fires_for o11y-rustfs-memory job '["o11y/rustfs"]' 0 || die "12: the RustFS memory rule does not fire above its threshold"
+fires_for o11y-ingest-dropped job '[]' || die "12: the ingest rule fires with nothing dropped"
+fires_for o11y-alloy-export component_id '[]' || die "12: the Alloy export rule fires with nothing failing"
+# A log line older than Loki accepts: Loki discards it and answers 400, and
+# Alloy's Loki exporter drops the batch for good.
+old=$(($(date +%s) - 8 * 86400))
+printf '{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"o11y-smoke-old"}}]},"scopeLogs":[{"scope":{"name":"o11y-smoke"},"logRecords":[{"timeUnixNano":"%s000000000","body":{"stringValue":"too old"}}]}]}]}' "$old" |
+  expect_status 200 -H 'Content-Type: application/json' --data-binary @- "$O11Y_CHECK_OTLP_URL/v1/logs" || die "12: Alloy refused the old log line"
+poll 120 fires_for o11y-ingest-dropped job '["o11y/loki"]' || die "12: Loki discarded a log line and the ingest rule does not fire for it"
+jq -e '[.[] | select(.value == 1) | .labels.reason] == ["greater_than_max_sample_age"]' <<<"$evaluated" >/dev/null ||
+  die "12: the ingest rule does not name Loki's reason"
+poll 120 fires_for o11y-alloy-export component_id '["otelcol.exporter.otlphttp.loki"]' ||
+  die "12: Alloy's Loki exporter dropped a batch and the export rule does not fire for it"
+# The stack's own log lines, which nothing ships yet: two of them, far
+# below the rule's threshold and above a threshold of 0.
+fires_for o11y-log-rate service_namespace '[]' || die "12: the log-rate rule fires with no stack log lines"
+now=$(date +%s)
+printf '{"resourceLogs":[{"resource":{"attributes":[{"key":"service.name","value":{"stringValue":"o11y-smoke-rate"}},{"key":"service.namespace","value":{"stringValue":"o11y"}}]},"scopeLogs":[{"scope":{"name":"o11y-smoke"},"logRecords":[{"timeUnixNano":"%s000000000","body":{"stringValue":"rate one"}},{"timeUnixNano":"%s000000001","body":{"stringValue":"rate two"}}]}]}]}' "$now" "$now" |
+  expect_status 200 -H 'Content-Type: application/json' --data-binary @- "$O11Y_CHECK_OTLP_URL/v1/logs" || die "12: Alloy refused the stack log lines"
+poll 120 fires_for o11y-log-rate service_namespace '["o11y"]' 0 || die "12: the log-rate rule does not fire above its threshold"
+fires_for o11y-log-rate service_namespace '[]' || die "12: the log-rate rule fires for two log lines"
+jq -e 'length == 1' <<<"$evaluated" >/dev/null || die "12: the log-rate rule reads no rate for the stack's log lines"
+posts() {
+  tools_dc exec -T alert-stub cat /tmp/posts 2>/dev/null
+}
+disk_notified() {
+  local recorded
+  recorded=$(posts) || return 1
+  grep -qx "path=/12345/$sentinel_webhook_token" <<<"$recorded" &&
+    grep -F '[FIRING:1] Disk free below the reserve' <<<"$recorded" | jq -e '.embeds | length >= 1' >/dev/null
+}
+poll 480 disk_notified || die "12: the stub did not receive the disk alert at the seeded webhook URL"
+disk_mailed() {
+  tools_dc exec -T alert-mail wget -qO- http://127.0.0.1:8025/api/v1/messages 2>/dev/null |
+    jq -e '[.messages[] | select(.To[0].Address == "smoke-to@example.invalid" and .From.Address == "smoke-from@example.invalid"
+      and (.Subject | contains("[FIRING:1] Disk free below the reserve")))] | length >= 1' >/dev/null
+}
+poll 120 disk_mailed || die "12: the SMTP stub did not receive the disk alert for the recipient, sent with the seeded password"
+main logs --no-color grafana >"$out/grafana.log" 2>&1 || die "12: the Grafana log could not be read"
+for sentinel in "$sentinel_webhook_token" "$sentinel_smtp_password"; do
+  sentinel_absent "$sentinel" "the Grafana log=$out/grafana.log" || die "12: Grafana logged an alert secret"
+done
+ok "12: each alert rule holds for what it watches and nothing else, and the disk alert reaches the webhook stub at the seeded URL and the SMTP stub with the seeded password"

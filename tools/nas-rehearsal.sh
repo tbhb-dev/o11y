@@ -146,6 +146,12 @@ version) echo 1.104.1 ;;
 *) echo "No serve config" ;;
 esac
 STUB
+# 1Password, for the webhook URL deploy sends the host: a Discord-shaped URL
+# whose webhook id 0 no Discord server holds.
+stub op <<'STUB'
+[ "$1 $2 $3" = "read --no-newline $O11Y_ALERT_DISCORD_WEBHOOK_REF" ] || exit 1
+printf '%s' https://discord.com/api/webhooks/0/o11y-rehearsal
+STUB
 
 tar -C /src --exclude ./.git --exclude ./tmp --exclude ./mise.local.toml -cf - . | tar -C "$work" -xf -
 tar -C /base -cf - . | tar -C "$base_work" -xf -
@@ -154,6 +160,7 @@ cd "$work"
 export PATH=$stubs:$PATH O11Y_COMPOSE=$compose
 export O11Y_SSH_HOST=nas.example.invalid O11Y_REMOTE_DIR=$remote O11Y_TAILNET_DOMAIN=example.ts.net
 export O11Y_REMOTE_DOCKER=/usr/local/bin/docker O11Y_REMOTE_COMPOSE=$compose O11Y_REMOTE_TAILSCALE=$stubs/tailscale
+export O11Y_ALERT_DISCORD_WEBHOOK_REF=rehearsal-webhook-ref
 # Ports of their own, so the rehearsal does not collide with a local smoke
 # run; the gate project keeps its fixed 13000, 14317 and 14318.
 export O11Y_GRAFANA_PORT=23000 O11Y_OTLP_GRPC_PORT=24317 O11Y_OTLP_HTTP_PORT=24318

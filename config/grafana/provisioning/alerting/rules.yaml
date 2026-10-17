@@ -1,0 +1,273 @@
+---
+# The stack's own alert rules, few and quiet, over the self-metrics in
+# Mimir and, for the log rate, the stack's own lines in Loki. Each query
+# returns one series per thing that can fail, and the threshold after it
+# decides. render.sh replaces the two @...@ tokens with the disk reserve
+# deploy enforces, O11Y_DISK_RESERVE_GB.
+#
+# Several counters exist only from their first increment, and increase()
+# can't count that first value. Those read as
+#   (c unless c offset 10m) or increase(c[10m])
+# which takes a series born in the last 10 minutes whole.
+#
+# A failed query fires the service-down rule's error alert and leaves the
+# others as they were, so a Mimir outage sends one message, not five.
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: o11y-stack
+    folder: o11y
+    interval: 1m
+    rules:
+      - uid: o11y-service-down
+        title: Stack service down
+        condition: C
+        for: 5m
+        noDataState: Alerting
+        execErrState: Error
+        labels: {}
+        annotations:
+          summary: "{{ $labels.job }} has been down for 5 minutes."
+          description: >-
+            Its scrape fails, or it has sent nothing for 90 seconds. Every
+            job down at once points at Alloy, which scrapes them all.
+        data:
+          - refId: A
+            datasourceUid: mimir
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                min by (job) (up{namespace="o11y"} and time() - timestamp(up{namespace="o11y"}) < 90)
+                or max by (job) (rustfs_start_total{job="o11y/rustfs"}
+                  and time() - timestamp(rustfs_start_total{job="o11y/rustfs"}) < 90) * 0 + 1
+                or label_replace(vector(0), "job", "o11y/alloy", "", "")
+                or label_replace(vector(0), "job", "o11y/grafana", "", "")
+                or label_replace(vector(0), "job", "o11y/loki", "", "")
+                or label_replace(vector(0), "job", "o11y/mimir", "", "")
+                or label_replace(vector(0), "job", "o11y/rustfs", "", "")
+                or label_replace(vector(0), "job", "o11y/tempo", "", "")
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: lt, params: [1]}
+
+      - uid: o11y-disk-low
+        title: Disk free below the reserve
+        condition: C
+        for: 5m
+        noDataState: OK
+        execErrState: KeepLast
+        labels: {}
+        annotations:
+          summary: >-
+            The filesystem under the stack's data has less than
+            @O11Y_DISK_RESERVE_GB@ GiB or 10 percent free.
+          description: >-
+            Deploy refuses to start below this reserve. RustFS reports the
+            free space of the filesystem it stores on.
+        data:
+          - refId: A
+            datasourceUid: mimir
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                (min by (job) (rustfs_cluster_capacity_free_bytes{job="o11y/rustfs"}) < bool @O11Y_DISK_RESERVE_BYTES@)
+                + (min by (job) (rustfs_cluster_capacity_free_bytes{job="o11y/rustfs"})
+                  < bool 0.1 * max by (job) (rustfs_cluster_capacity_usable_total_bytes{job="o11y/rustfs"}))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+
+      - uid: o11y-ingest-dropped
+        title: Ingest dropped
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: KeepLast
+        labels: {}
+        annotations:
+          summary: "{{ $labels.job }} dropped data in the last 10 minutes: {{ $labels.reason }}."
+          description: >-
+            A backend discarded samples, spans or log lines it received, or
+            Alloy refused them at its receivers, usually under memory
+            pressure.
+        data:
+          - refId: A
+            datasourceUid: mimir
+            relativeTimeRange: {from: 1200, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                sum by (job, reason) ((loki_discarded_samples_total{job="o11y/loki"}
+                  unless loki_discarded_samples_total{job="o11y/loki"} offset 10m)
+                  or increase(loki_discarded_samples_total{job="o11y/loki"}[10m])) > 0
+                or sum by (job, reason) ((cortex_discarded_samples_total{job="o11y/mimir"}
+                  unless cortex_discarded_samples_total{job="o11y/mimir"} offset 10m)
+                  or increase(cortex_discarded_samples_total{job="o11y/mimir"}[10m])) > 0
+                or sum by (job, reason) ((tempo_discarded_spans_total{job="o11y/tempo"}
+                  unless tempo_discarded_spans_total{job="o11y/tempo"} offset 10m)
+                  or increase(tempo_discarded_spans_total{job="o11y/tempo"}[10m])) > 0
+                or label_replace(sum by (job) ((otelcol_receiver_refused_spans_total{job="o11y/alloy"}
+                  unless otelcol_receiver_refused_spans_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_receiver_refused_spans_total{job="o11y/alloy"}[10m])) > 0,
+                  "reason", "refused spans", "", "")
+                or label_replace(sum by (job) ((otelcol_receiver_refused_metric_points_total{job="o11y/alloy"}
+                  unless otelcol_receiver_refused_metric_points_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_receiver_refused_metric_points_total{job="o11y/alloy"}[10m])) > 0,
+                  "reason", "refused metric points", "", "")
+                or label_replace(sum by (job) ((otelcol_receiver_refused_log_records_total{job="o11y/alloy"}
+                  unless otelcol_receiver_refused_log_records_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_receiver_refused_log_records_total{job="o11y/alloy"}[10m])) > 0,
+                  "reason", "refused log records", "", "")
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+
+      - uid: o11y-rustfs-memory
+        title: RustFS memory high
+        condition: C
+        for: 10m
+        noDataState: OK
+        execErrState: KeepLast
+        labels: {}
+        annotations:
+          summary: RustFS has used more than 85 percent of its memory limit for 10 minutes.
+          description: >-
+            Past its mem_limit in compose.yaml the kernel kills RustFS, and
+            every backend loses its object store.
+        data:
+          - refId: A
+            datasourceUid: mimir
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              instant: true
+              # 805306368 is the rustfs mem_limit, 768m; render.bats holds
+              # the two together.
+              expr: >-
+                max by (job) (rustfs_system_process_resident_memory_bytes{job="o11y/rustfs"}) / 805306368
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0.85]}
+
+      - uid: o11y-alloy-export
+        title: Alloy queue full or export failing
+        condition: C
+        for: 2m
+        noDataState: OK
+        execErrState: KeepLast
+        labels: {}
+        annotations:
+          summary: "{{ $labels.component_id }}: {{ $labels.problem }}."
+          description: >-
+            Alloy lost data it had accepted, or is close to it: an exporter
+            gave up on a batch, a queue refused one, or a queue is nearly
+            full.
+        data:
+          - refId: A
+            datasourceUid: mimir
+            relativeTimeRange: {from: 1200, to: 0}
+            model:
+              refId: A
+              instant: true
+              expr: >-
+                label_replace(max by (component_id) (otelcol_exporter_queue_size{job="o11y/alloy"}
+                  / otelcol_exporter_queue_capacity{job="o11y/alloy"}) > 0.9,
+                  "problem", "queue over 90 percent full", "", "")
+                or label_replace(sum by (component_id) ((otelcol_exporter_send_failed_spans_total{job="o11y/alloy"}
+                  unless otelcol_exporter_send_failed_spans_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_send_failed_spans_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "export failed", "", "")
+                or label_replace(sum by (component_id) ((
+                  otelcol_exporter_send_failed_metric_points_total{job="o11y/alloy"}
+                  unless otelcol_exporter_send_failed_metric_points_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_send_failed_metric_points_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "export failed", "", "")
+                or label_replace(sum by (component_id) ((
+                  otelcol_exporter_send_failed_log_records_total{job="o11y/alloy"}
+                  unless otelcol_exporter_send_failed_log_records_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_send_failed_log_records_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "export failed", "", "")
+                or label_replace(sum by (component_id) ((
+                  otelcol_exporter_enqueue_failed_spans_total{job="o11y/alloy"}
+                  unless otelcol_exporter_enqueue_failed_spans_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_enqueue_failed_spans_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "queue full", "", "")
+                or label_replace(sum by (component_id) ((
+                  otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy"}
+                  unless otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_enqueue_failed_metric_points_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "queue full", "", "")
+                or label_replace(sum by (component_id) ((
+                  otelcol_exporter_enqueue_failed_log_records_total{job="o11y/alloy"}
+                  unless otelcol_exporter_enqueue_failed_log_records_total{job="o11y/alloy"} offset 10m)
+                  or increase(otelcol_exporter_enqueue_failed_log_records_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "queue full", "", "")
+                or label_replace(sum by (component_id) (
+                  increase(prometheus_remote_storage_samples_failed_total{job="o11y/alloy"}[10m])) > 0,
+                  "problem", "export failed", "", "")
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [0]}
+
+      # The stack's own log volume in Loki, which shipping container logs
+      # can multiply. Sustained, 50 lines a second is about 4 million lines
+      # a day.
+      - uid: o11y-log-rate
+        title: Stack log rate high
+        condition: C
+        for: 1h
+        noDataState: OK
+        execErrState: KeepLast
+        labels: {}
+        annotations:
+          summary: The stack has logged more than 50 lines a second to Loki for an hour.
+          description: >-
+            A service that logs in a loop fills the disk under Loki faster
+            than retention frees it.
+        data:
+          - refId: A
+            datasourceUid: loki
+            relativeTimeRange: {from: 600, to: 0}
+            model:
+              refId: A
+              queryType: instant
+              expr: sum by (service_namespace) (rate({service_namespace="o11y"}[5m]))
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: threshold
+              expression: A
+              conditions:
+                - evaluator: {type: gt, params: [50]}
