@@ -253,8 +253,8 @@ description = "Test the release renderer, the S3 probe, validation's isolation, 
 run = "bats tools/render.bats tools/lib.bats tools/probe.bats tools/rustfs-probe.bats tools/validate.bats tools/fault-run.bats"
 
 [tasks.test-nas]
-description = "Test the deploy host tasks against a fake host, with ssh, sudo and the host's binaries stubbed"
-run = "bats tools/nas.bats"
+description = "Test the deploy host tasks and the container-log facts script against a fake host, with ssh, sudo and the host's binaries stubbed"
+run = "bats tools/nas.bats tools/logs-facts.bats"
 
 # Local only: it runs the tasks in a container on the engine's socket and
 # downloads the Compose binary, so CI does not run it.
@@ -323,6 +323,10 @@ run = "bash tools/nas.sh deploy-plan"
 [tasks.preflight]
 description = "Read facts off the deploy host: SSH, sudo, versions, listeners, free space, containers. Changes nothing"
 run = "bash tools/nas.sh preflight"
+
+[tasks.logs-facts]
+description = "Read the container-log facts off the deploy host: data root, mounts, log access, drivers, growth, listeners. Changes nothing on the stack"
+run = "bash tools/nas.sh logs-facts"
 
 [tasks.stage]
 description = "Render a release, upload and verify it, and pull its images. Starts nothing. Needs O11Y_CONFIRM=stage"
